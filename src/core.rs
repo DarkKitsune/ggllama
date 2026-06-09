@@ -1,6 +1,10 @@
 use std::{num::NonZeroU32, path::Path};
 
-use llama_cpp_4::{context::{LlamaContext, params::LlamaContextParams}, llama_backend::LlamaBackend, model::{LlamaModel, params::LlamaModelParams}};
+use llama_cpp_4::{
+    context::{LlamaContext, params::LlamaContextParams},
+    llama_backend::LlamaBackend,
+    model::{LlamaModel, params::LlamaModelParams},
+};
 use static_init::dynamic;
 
 use crate::inference::Inference;
@@ -18,10 +22,9 @@ pub struct Core {
 impl Core {
     /// Loads a LLaMA model from the specified path and initializes a `Core` from it.
     pub fn from_model(model_path: impl AsRef<Path>) -> Self {
-        let params = LlamaModelParams::default()
-            .with_n_gpu_layers(99);
+        let params = LlamaModelParams::default().with_n_gpu_layers(99);
         let model = LlamaModel::load_from_file(&BACKEND, model_path, &params).unwrap();
-        
+
         Self { model }
     }
 

@@ -1,7 +1,4 @@
-use std::num::NonZeroU32;
-
 use ggllama::{core::Core, inference::ChatRole};
-use llama_cpp_4::{context::params::LlamaContextParams, llama_batch::LlamaBatch, model::{AddBos, Special}, sampling::LlamaSampler};
 
 fn main() {
     let core = Core::from_model("models/LFM2.5-8B-A1B-Q5_K_M.gguf");

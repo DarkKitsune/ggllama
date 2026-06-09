@@ -1,6 +1,11 @@
 use std::fmt::Display;
 
-use llama_cpp_4::{context::LlamaContext, llama_batch::LlamaBatch, model::{AddBos, LlamaChatMessage, LlamaModel, Special}, sampling::LlamaSampler};
+use llama_cpp_4::{
+    context::LlamaContext,
+    llama_batch::LlamaBatch,
+    model::{AddBos, LlamaChatMessage, LlamaModel, Special},
+    sampling::LlamaSampler,
+};
 
 /// A single inference result.
 pub struct InferenceResult {
@@ -47,11 +52,14 @@ impl Display for ChatRole {
     }
 }
 
-
 /// Represents a chat message.
 
 impl<'a> Inference<'a> {
-    pub(crate) fn new(model: &'a LlamaModel, context: LlamaContext<'a>, context_window_length: usize) -> Self {
+    pub(crate) fn new(
+        model: &'a LlamaModel,
+        context: LlamaContext<'a>,
+        context_window_length: usize,
+    ) -> Self {
         // Create adaptive sampler
         let sampler = LlamaSampler::chain_simple([
             LlamaSampler::adaptive_p(0.87, 0.9, 0),
@@ -61,13 +69,27 @@ impl<'a> Inference<'a> {
         // Create batch for decoding tokens into the context, with a capacity of 16 tokens (this is just a reasonable default and can be changed later if needed).
         let batch = LlamaBatch::new(context_window_length, 1);
 
-        Self { model, context, context_token_count: 0, sampler, batch, queued_text: String::new() }
+        Self {
+            model,
+            context,
+            context_token_count: 0,
+            sampler,
+            batch,
+            queued_text: String::new(),
+        }
     }
 
     /// Push text into the context at the current position, without generating any tokens.
-    pub(crate) fn push_text_and_update_token_count(&mut self, text: impl AsRef<str>, is_last_before_infer: bool) {
+    pub(crate) fn push_text_and_update_token_count(
+        &mut self,
+        text: impl AsRef<str>,
+        is_last_before_infer: bool,
+    ) {
         // Tokenize the text and get the length
-        let tokens = self.model.str_to_token(text.as_ref(), AddBos::Never).unwrap();
+        let tokens = self
+            .model
+            .str_to_token(text.as_ref(), AddBos::Never)
+            .unwrap();
         let token_count = tokens.len();
 
         // Batch the tokens, initializing logits for the last token if this is the last push before generation
@@ -75,10 +97,12 @@ impl<'a> Inference<'a> {
         for (pos, token) in tokens.into_iter().enumerate() {
             // We only initialize logits for the last batch before generation, as those are the only ones that will be read from.
             let logits = is_last_before_infer && pos == token_count - 1;
-            self.batch.add(token, self.context_token_count as i32, &[0], logits).unwrap();
+            self.batch
+                .add(token, self.context_token_count as i32, &[0], logits)
+                .unwrap();
             self.context_token_count += 1;
         }
-        
+
         // Decode the batch into the context, which adds the tokens to the context
         self.context.decode(&mut self.batch).unwrap();
     }
@@ -89,12 +113,22 @@ impl<'a> Inference<'a> {
     }
 
     /// Queue messages to be added to the context, then begin the assistant response to said messages.
-    pub fn start_response_to_messages(&mut self, messages: impl IntoIterator<Item = (ChatRole, impl Display)>) {
+    pub fn start_response_to_messages(
+        &mut self,
+        messages: impl IntoIterator<Item = (ChatRole, impl Display)>,
+    ) {
         // Convert the messages into the format expected by the model's chat template system, then apply the chat template to get the final messages as a prompt
-        let messages: Vec<_> = messages.into_iter().map(|(role, content)| {
-            LlamaChatMessage::new(role.to_chatml_role().to_string(), content.to_string()).unwrap()
-        }).collect();
-        let messages = self.model.apply_chat_template(None, &messages, true).unwrap();
+        let messages: Vec<_> = messages
+            .into_iter()
+            .map(|(role, content)| {
+                LlamaChatMessage::new(role.to_chatml_role().to_string(), content.to_string())
+                    .unwrap()
+            })
+            .collect();
+        let messages = self
+            .model
+            .apply_chat_template(None, &messages, true)
+            .unwrap();
 
         self.push_text(messages);
     }
@@ -129,7 +163,9 @@ impl<'a> Inference<'a> {
             let token = self.sampler.sample(&self.context, -1);
 
             // Exit early if the token is an end-of-sequence token
-            if self.model.is_eog_token(token) { break; }
+            if self.model.is_eog_token(token) {
+                break;
+            }
 
             // Convert the token to a string
             let token_str = self.model.token_to_str(token, Special::Plaintext).unwrap();
@@ -137,7 +173,7 @@ impl<'a> Inference<'a> {
             // Append the token string to the output after saving the old byte length for truncation
             let old_len = output.len();
             output.push_str(&token_str);
-            
+
             // If the output contains any of the stop sequences, break the loop early after decoding the token into the context
             let mut stop_sequence_found = false;
             for stop_sequence in stop_sequences {
@@ -147,18 +183,23 @@ impl<'a> Inference<'a> {
 
                     // Get the length of the token after truncating
                     let truncated_token_len = output.len() - old_len;
-                    
+
                     // Truncate the token string to the truncated token length, so that we only decode the part of the token that is actually in the output. This ensures that the context is consistent with the output, even if we stop early.
                     let truncated_token_str = &token_str[..truncated_token_len];
-                    
+
                     // Convert the truncated token string back to one or more tokens, so that we can decode it into the context
-                    let truncated_tokens = self.model.str_to_token(truncated_token_str, AddBos::Never).unwrap();
+                    let truncated_tokens = self
+                        .model
+                        .str_to_token(truncated_token_str, AddBos::Never)
+                        .unwrap();
 
                     // Batch the truncated tokens
                     self.batch.clear();
                     for (pos, &t) in truncated_tokens.iter().enumerate() {
                         let logits = pos == truncated_tokens.len() - 1;
-                        self.batch.add(t, self.context_token_count as i32, &[0], logits).unwrap();
+                        self.batch
+                            .add(t, self.context_token_count as i32, &[0], logits)
+                            .unwrap();
                         self.context_token_count += 1;
                     }
 
@@ -175,12 +216,14 @@ impl<'a> Inference<'a> {
             if stop_sequence_found {
                 break;
             }
-            
+
             // Set the batch contents to the token and position of the generated token, with logits initialized
             self.batch.clear();
-            self.batch.add(token, self.context_token_count as i32, &[0], true).unwrap();
+            self.batch
+                .add(token, self.context_token_count as i32, &[0], true)
+                .unwrap();
             self.context_token_count += 1;
-            
+
             // Decode the batch into the context, which adds the token to the context
             self.context.decode(&mut self.batch).unwrap();
         }
@@ -229,7 +272,9 @@ impl<'a> Inference<'a> {
     pub fn end_response(&mut self) {
         let eot_token = self.model.token_eot();
         self.batch.clear();
-        self.batch.add(eot_token, self.context_token_count as i32, &[0], true).unwrap();
+        self.batch
+            .add(eot_token, self.context_token_count as i32, &[0], true)
+            .unwrap();
         self.context_token_count += 1;
         self.context.decode(&mut self.batch).unwrap();
     }
