@@ -52,8 +52,6 @@ impl Display for ChatRole {
     }
 }
 
-/// Represents a chat message.
-
 impl<'a> Inference<'a> {
     pub(crate) fn new(
         model: &'a LlamaModel,
@@ -113,10 +111,12 @@ impl<'a> Inference<'a> {
     }
 
     /// Queue messages to be added to the context, then begin the assistant response to said messages.
+    /// If `reasoning` is true, then the model will generate a reasoning trace and return it.
     pub fn start_response_to_messages(
         &mut self,
         messages: impl IntoIterator<Item = (ChatRole, impl Display)>,
-    ) {
+        reasoning: bool,
+    ) -> Option<String> {
         // Convert the messages into the format expected by the model's chat template system, then apply the chat template to get the final messages as a prompt
         let messages: Vec<_> = messages
             .into_iter()
@@ -131,11 +131,33 @@ impl<'a> Inference<'a> {
             .unwrap();
 
         self.push_text(messages);
+
+        // Generate the reasoning trace if reasoning is enabled, otherwise we push an empty reasoning trace
+        let reasoning_trace = if reasoning {
+            Some(self.think(None))
+        } else {
+            self.no_think();
+            None
+        };
+
+        reasoning_trace
     }
 
     /// Begin the assistant response message without pushing any user or system messages first.
-    pub fn start_response(&mut self) {
+    /// If `reasoning` is true, then the model will generate a reasoning trace and return it.
+    pub fn start_response(&mut self, reasoning: bool) -> Option<String> {
+        // Start the assistant message
         self.push_text(self.model.apply_chat_template(None, &[], true).unwrap());
+
+        // Generate the reasoning trace if reasoning is enabled, otherwise we push an empty reasoning trace
+        let reasoning_trace = if reasoning {
+            Some(self.think(None))
+        } else {
+            self.no_think();
+            None
+        };
+
+        reasoning_trace
     }
 
     /// Infer the next `max_tokens` tokens into the chat context. If this is an assistant message, then use `start_response` to push the user and system messages first, then call this method.
@@ -241,8 +263,8 @@ impl<'a> Inference<'a> {
         }
     }
 
-    /// Generate reasoning traces for the next `max_tokens` tokens, then convert them to a string and return it.
-    pub fn think(&mut self, max_tokens: Option<usize>) -> String {
+    /// Generate a reasoning trace in the context, and return the string.
+    pub(crate) fn think(&mut self, max_tokens: Option<usize>) -> String {
         // Start the <think> block
         self.push_text("<think>");
 
@@ -263,8 +285,8 @@ impl<'a> Inference<'a> {
         result
     }
 
-    /// Use empty reasoning traces, causing the model to not use its reasoning capabilities (AKA thinking "disabled").
-    pub fn no_think(&mut self) {
+    /// Push an empty reasoning trace into the context, causing the model to not use its reasoning capabilities (AKA thinking "disabled").
+    pub(crate) fn no_think(&mut self) {
         self.push_text("<think>\n\n</think>");
     }
 
