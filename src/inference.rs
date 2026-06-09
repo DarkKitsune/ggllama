@@ -4,7 +4,7 @@ use llama_cpp_4::{
     context::LlamaContext,
     llama_batch::LlamaBatch,
     model::{AddBos, LlamaChatMessage, LlamaModel, Special},
-    sampling::LlamaSampler,
+    sampling::LlamaSampler, token::LlamaToken,
 };
 
 /// A single inference result.
@@ -108,6 +108,26 @@ impl<'a> Inference<'a> {
     /// Queue text to be added to the context before the next generation call.
     pub fn push_text(&mut self, text: impl Display) {
         self.queued_text.push_str(&text.to_string());
+    }
+
+    /// Push tokens into the context.
+    pub(crate) fn push_tokens(&mut self, tokens: &[LlamaToken]) {
+        // We need to properly handle queued text before decoding tokens into the context so...
+        // If we have queued text, push it to the context before generating.
+        if !self.queued_text.is_empty() {
+            self.push_text_and_update_token_count(self.queued_text.to_string(), true);
+            self.queued_text.clear();
+        }
+
+        self.batch.clear();
+        for (idx, &token) in tokens.iter().enumerate() {
+            let logits = idx == tokens.len() - 1;
+            self.batch
+                .add(token, self.context_token_count as i32, &[0], logits)
+                .unwrap();
+            self.context_token_count += 1;
+        }
+        self.context.decode(&mut self.batch).unwrap();
     }
 
     /// Queue messages to be added to the context, then begin the assistant response to said messages.
@@ -282,7 +302,7 @@ impl<'a> Inference<'a> {
             self.push_text("</think>");
         }
 
-        result
+        result.trim().to_string()
     }
 
     /// Push an empty reasoning trace into the context, causing the model to not use its reasoning capabilities (AKA thinking "disabled").
@@ -290,14 +310,8 @@ impl<'a> Inference<'a> {
         self.push_text("<think>\n\n</think>");
     }
 
-    /// Push the end of the assistant response message into the context.
+    /// Terminate the current response message by pushing the EOT token into the context.
     pub fn end_response(&mut self) {
-        let eot_token = self.model.token_eot();
-        self.batch.clear();
-        self.batch
-            .add(eot_token, self.context_token_count as i32, &[0], true)
-            .unwrap();
-        self.context_token_count += 1;
-        self.context.decode(&mut self.batch).unwrap();
+        self.push_tokens(&[self.model.token_eot()]);
     }
 }

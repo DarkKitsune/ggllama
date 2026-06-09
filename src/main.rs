@@ -11,14 +11,13 @@ fn main() {
         Keep it under 5 sentences. Don't use markdown formatting."),
     ], true);
 
-    println!("Reasoning trace:\n{}\n", reasoning_trace.unwrap_or_else(|| "No reasoning trace generated.".to_string()));
-
     // Infer until the end of the message
     let result = inference.infer(None, &[]);
 
     // Push the end of the response to properly terminate it in the context.
     inference.end_response();
 
+    println!("Reasoning trace:\n{}\n", reasoning_trace.unwrap_or_else(|| "No reasoning trace generated.".to_string()));
     println!("Result:\n{}\n", result.content);
     println!("Prefill tok/s: {}", result.prefill_tokens_per_second);
     println!("Inference tok/s: {}", result.inference_tokens_per_second);
