@@ -73,22 +73,25 @@ impl Core {
         let mut inference = self.infer();
 
         // Ask the model to summarize the text
-        let system_prompt = "You are a helpful assistant that summarizes text.";
-        let user_prompt = format!(
-            "## Requirements:\n\
-            - The summary should be concise.\n\
+        let system_prompt = format!(
+            "You are a helpful assistant that summarizes text. \
+            When given a piece of text, you will produce a concise summary that captures the main points. \
+            Use the following hints/guidelines to guide your summarization:\n\
+            ## Hints/Guidelines:\n\
             - The summary should capture the main points of the text.\n\
-            - The summary should be easy to understand.\n\
-            {}\n\n\
-            ## Task:\n\
-            Summarize the following text in a concise manner:\n{}",
+            - Do not omit any important details from the text in your summary.\n\
+            {}",
             hints.iter().map(|hint| format!("- {}\n", hint)).collect::<String>(),
+        );
+        let user_prompt = format!(
+            "## Task:\n\
+            Summarize the following text in a concise manner:\n```\n{}\n```",
             text,
         );
         inference.start_response_to_messages(
             [
                 (ChatRole::System, system_prompt),
-                (ChatRole::User, &user_prompt),
+                (ChatRole::User, user_prompt),
             ],
             false
         );

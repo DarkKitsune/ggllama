@@ -9,9 +9,23 @@ use llama_cpp_4::{
 
 /// A single inference result.
 pub struct InferenceResult {
+    pub encountered_stop_sequence: Option<String>,
     pub content: String,
     pub inference_tokens_per_second: f32,
     pub prefill_tokens_per_second: f32,
+}
+
+impl InferenceResult {
+    /// Get the content with the stop sequence ommitted, if a stop sequence was encountered.
+    pub fn content_without_stop_sequence(&self) -> &str {
+        if let Some(stop_sequence) = &self.encountered_stop_sequence {
+            if let Some(pos) = self.content.find(stop_sequence) {
+                return &self.content[..pos];
+            }
+        }
+
+        &self.content
+    }
 }
 
 /// Represents an inference job that is currently running, handling the context automatically and providing an API for generating tokens.
@@ -154,8 +168,15 @@ impl<'a> Inference<'a> {
 
         // Generate the reasoning trace if reasoning is enabled, otherwise we push an empty reasoning trace
         let reasoning_trace = if reasoning {
-            Some(self.think(None))
-        } else {
+            let trace = self.think(None);
+            if trace.is_empty() {
+                None
+            }
+            else {
+                Some(trace)
+            }
+        }
+        else {
             self.no_think();
             None
         };
@@ -171,7 +192,13 @@ impl<'a> Inference<'a> {
 
         // Generate the reasoning trace if reasoning is enabled, otherwise we push an empty reasoning trace
         let reasoning_trace = if reasoning {
-            Some(self.think(None))
+            let trace = self.think(None);
+            if trace.is_empty() {
+                None
+            }
+            else {
+                Some(trace)
+            }
         } else {
             self.no_think();
             None
@@ -200,6 +227,7 @@ impl<'a> Inference<'a> {
         let mut output = String::new();
         let timing_start_time = std::time::Instant::now();
         let timing_start_token_count = self.context_token_count;
+        let mut encountered_stop_sequence = None;
         for _ in 0..max_tokens.unwrap_or(usize::MAX) {
             // Generate the next token
             let token = self.sampler.sample(&self.context, -1);
@@ -217,7 +245,6 @@ impl<'a> Inference<'a> {
             output.push_str(&token_str);
 
             // If the output contains any of the stop sequences, break the loop early after decoding the token into the context
-            let mut stop_sequence_found = false;
             for stop_sequence in stop_sequences {
                 if let Some(pos) = output.find(stop_sequence) {
                     // Truncate the output to the position of the stop sequence + the length of the stop sequence, so that the stop sequence is included in the output.
@@ -249,13 +276,13 @@ impl<'a> Inference<'a> {
                     self.context.decode(&mut self.batch).unwrap();
 
                     // Break the loop, as we've hit a stop sequence and don't want to generate any more tokens.
-                    stop_sequence_found = true;
+                    encountered_stop_sequence = Some(stop_sequence.to_string());
                     break;
                 }
             }
 
             // If we found a stop sequence, break this loop too.
-            if stop_sequence_found {
+            if encountered_stop_sequence.is_some() {
                 break;
             }
 
@@ -280,6 +307,7 @@ impl<'a> Inference<'a> {
             content: output,
             prefill_tokens_per_second,
             inference_tokens_per_second,
+            encountered_stop_sequence,
         }
     }
 
