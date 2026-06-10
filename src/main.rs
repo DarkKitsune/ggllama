@@ -1,7 +1,8 @@
-use ggllama::{core::Core, inference::ChatRole};
+use ggllama::{core::{CompressionLevel, Core}, inference::ChatRole};
 
 fn main() {
-    let core = Core::from_model("models/LFM2.5-8B-A1B-Q5_K_M.gguf");
+    // Initialize the core with the model and some KV cache compression.
+    let core = Core::from_model("models/LFM2.5-8B-A1B-Q5_K_M.gguf", CompressionLevel::High);
     let mut inference = core.infer();
 
     // Start a response to the messages in the conversation so far
