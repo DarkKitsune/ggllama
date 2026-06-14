@@ -1,24 +1,18 @@
-use ggllama::{core::{CompressionLevel, Core}, inference::ChatRole};
+use ggllama::{chat::{Chat, ChatRole}, core::{CompressionLevel, Core}};
 
 fn main() {
-    // Initialize the core with the model and some KV cache compression.
+    // Initialize the core with the model and some KV cache quantization/compression.
     let core = Core::from_model("models/Qwen3.5-9B-Claude-4.6-HighIQ-INSTRUCT.i1-Q5_K_M.gguf", CompressionLevel::Medium);
-    let mut inference = core.infer();
+    
+    // Start a chat
+    let mut chat = Chat::new(&core, "You are a helpful assistant.");
+    
+    // Push a user message to the chat.
+    chat.push_message(ChatRole::User, "Please give me a short and easy to understand explanation for what a transformer model is. Keep it under 5 sentences. Don't use markdown formatting.");
 
-    // Start a response to the messages in the conversation so far
-    inference.start_response_to_messages([
-        (ChatRole::System, "You are a helpful assistant."),
-        (ChatRole::User, "Please give me a short and easy to understand explanation for what a transformer model is. \
-        Keep it under 5 sentences. Don't use markdown formatting."),
-    ], false);
+    // Infer the response from the chat.
+    let response = chat.infer_response(None, &[], None);
 
-    // Infer until the end of the message
-    let result = inference.infer(None, &[]);
-
-    // Push the end of the response to properly terminate it in the context.
-    inference.end_response();
-
-    println!("Result:\n{}\n", result.content);
-    println!("Prefill tok/s: {}", result.prefill_tokens_per_second);
-    println!("Inference tok/s: {}", result.inference_tokens_per_second);
+    // Print the response.
+    println!("Response: {:?}", response);
 }

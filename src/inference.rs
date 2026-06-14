@@ -7,7 +7,10 @@ use llama_cpp_4::{
     sampling::LlamaSampler, token::LlamaToken,
 };
 
+use crate::chat::{ChatMessage, ChatRole};
+
 /// A single inference result.
+#[derive(Debug, Clone)]
 pub struct InferenceResult {
     pub encountered_stop_sequence: Option<String>,
     pub content: String,
@@ -28,25 +31,24 @@ impl InferenceResult {
     }
 }
 
+/// A stored checkpoint of an inference job, which can be used to resume/rewind an inference job by restoring the context to the state it was in when the checkpoint was taken.
+pub struct InferenceCheckpoint {
+    pub tokens: Vec<LlamaToken>,
+    pub queued_text: String,
+}
+
 /// Represents an inference job that is currently running, handling the context automatically and providing an API for generating tokens.
 pub struct Inference<'a> {
     model: &'a LlamaModel,
     context: LlamaContext<'a>,
-    context_token_count: usize,
+    /// We keep a copy of the tokens in the context, so we can effectively restore, modify, or rewind the context.
+    /// This also lets use count the number of tokens in the context.
+    tokens: Vec<LlamaToken>,
     sampler: LlamaSampler,
     batch: LlamaBatch,
     /// We queue text that must be added to the context until the next generation call, at which point we add it and then clear the queue.
     /// This allows us to properly initialize logits before generating.
     queued_text: String,
-}
-
-/// Represents the sender of a chat message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ChatRole {
-    System,
-    User,
-    Assistant,
-    Tool,
 }
 
 impl ChatRole {
@@ -70,6 +72,7 @@ impl<'a> Inference<'a> {
     pub(crate) fn new(
         model: &'a LlamaModel,
         context: LlamaContext<'a>,
+        tokens: Vec<LlamaToken>,
         context_window_length: usize,
     ) -> Self {
         // Create adaptive sampler
@@ -84,15 +87,23 @@ impl<'a> Inference<'a> {
         Self {
             model,
             context,
-            context_token_count: 0,
+            tokens,
             sampler,
             batch,
             queued_text: String::new(),
         }
     }
 
-    /// Push text into the context at the current position, without generating any tokens.
-    pub(crate) fn push_text_and_update_token_count(
+    /// Create a checkpoint of the current state of the inference job, which can be used to restore the context to this state later.
+    pub fn checkpoint(&self) -> InferenceCheckpoint {
+        InferenceCheckpoint {
+            tokens: self.tokens.clone(),
+            queued_text: self.queued_text.clone(),
+        }
+    }
+
+    /// Moves the content of the queued text into the context, initializing logits for the last token if specified.
+    pub(crate) fn unqueue_to_context(
         &mut self,
         text: impl AsRef<str>,
         is_last_before_infer: bool,
@@ -110,13 +121,16 @@ impl<'a> Inference<'a> {
             // We only initialize logits for the last batch before generation, as those are the only ones that will be read from.
             let logits = is_last_before_infer && pos == token_count - 1;
             self.batch
-                .add(token, self.context_token_count as i32, &[0], logits)
+                .add(token, self.tokens.len() as i32, &[0], logits)
                 .unwrap();
-            self.context_token_count += 1;
+            self.tokens.push(token);
         }
 
         // Decode the batch into the context, which adds the tokens to the context
         self.context.decode(&mut self.batch).unwrap();
+
+        // Clear the queued text as it has now been moved into the context
+        self.queued_text.clear();
     }
 
     /// Queue text to be added to the context before the next generation call.
@@ -129,33 +143,32 @@ impl<'a> Inference<'a> {
         // We need to properly handle queued text before decoding tokens into the context so...
         // If we have queued text, push it to the context before generating.
         if !self.queued_text.is_empty() {
-            self.push_text_and_update_token_count(self.queued_text.to_string(), true);
-            self.queued_text.clear();
+            self.unqueue_to_context(self.queued_text.to_string(), true);
         }
 
         self.batch.clear();
         for (idx, &token) in tokens.iter().enumerate() {
             let logits = idx == tokens.len() - 1;
             self.batch
-                .add(token, self.context_token_count as i32, &[0], logits)
+                .add(token, self.tokens.len() as i32, &[0], logits)
                 .unwrap();
-            self.context_token_count += 1;
+            self.tokens.push(token);
         }
         self.context.decode(&mut self.batch).unwrap();
     }
 
     /// Queue messages to be added to the context, then begin the assistant response to said messages.
     /// If `reasoning` is true, then the model will generate a reasoning trace and return it.
-    pub fn start_response_to_messages(
+    pub fn start_response_to_messages<'b>(
         &mut self,
-        messages: impl IntoIterator<Item = (ChatRole, impl Display)>,
+        messages: impl IntoIterator<Item = &'b ChatMessage>,
         reasoning: bool,
     ) -> Option<String> {
         // Convert the messages into the format expected by the model's chat template system, then apply the chat template to get the final messages as a prompt
         let messages: Vec<_> = messages
             .into_iter()
-            .map(|(role, content)| {
-                LlamaChatMessage::new(role.to_chatml_role().to_string(), content.to_string())
+            .map(|message| {
+                LlamaChatMessage::new(message.role.to_chatml_role().to_string(), message.content.to_string())
                     .unwrap()
             })
             .collect();
@@ -213,20 +226,19 @@ impl<'a> Inference<'a> {
         // If we have queued text, push it to the context before generating.
         // Also measure this as prefill timing
         let prefill_start_time = std::time::Instant::now();
-        let prefill_start_token_count = self.context_token_count;
+        let prefill_start_token_count = self.tokens.len();
         if !self.queued_text.is_empty() {
-            self.push_text_and_update_token_count(self.queued_text.to_string(), true);
-            self.queued_text.clear();
+            self.unqueue_to_context(self.queued_text.to_string(), true);
         }
         let prefill_end_time = std::time::Instant::now();
         let prefill_duration = prefill_end_time.duration_since(prefill_start_time);
-        let prefill_token_count = self.context_token_count - prefill_start_token_count;
+        let prefill_token_count = self.tokens.len() - prefill_start_token_count;
         let prefill_tokens_per_second = prefill_token_count as f32 / prefill_duration.as_secs_f32();
 
         // Generate the next `n` tokens, then convert them to a string and return it.
         let mut output = String::new();
         let timing_start_time = std::time::Instant::now();
-        let timing_start_token_count = self.context_token_count;
+        let timing_start_token_count = self.tokens.len();
         let mut encountered_stop_sequence = None;
         for _ in 0..max_tokens.unwrap_or(usize::MAX) {
             // Generate the next token
@@ -267,9 +279,9 @@ impl<'a> Inference<'a> {
                     for (pos, &t) in truncated_tokens.iter().enumerate() {
                         let logits = pos == truncated_tokens.len() - 1;
                         self.batch
-                            .add(t, self.context_token_count as i32, &[0], logits)
+                            .add(t, self.tokens.len() as i32, &[0], logits)
                             .unwrap();
-                        self.context_token_count += 1;
+                        self.tokens.push(t);
                     }
 
                     // Decode the batch of truncated tokens into the context
@@ -289,9 +301,9 @@ impl<'a> Inference<'a> {
             // Set the batch contents to the token and position of the generated token, with logits initialized
             self.batch.clear();
             self.batch
-                .add(token, self.context_token_count as i32, &[0], true)
+                .add(token, self.tokens.len() as i32, &[0], true)
                 .unwrap();
-            self.context_token_count += 1;
+            self.tokens.push(token);
 
             // Decode the batch into the context, which adds the token to the context
             self.context.decode(&mut self.batch).unwrap();
@@ -300,7 +312,7 @@ impl<'a> Inference<'a> {
         // Calculate inference timing
         let timing_end_time = std::time::Instant::now();
         let timing_duration = timing_end_time - timing_start_time;
-        let tokens_generated = self.context_token_count - timing_start_token_count;
+        let tokens_generated = self.tokens.len() - timing_start_token_count;
         let inference_tokens_per_second = tokens_generated as f32 / timing_duration.as_secs_f32();
 
         InferenceResult {

@@ -7,7 +7,7 @@ use llama_cpp_4::{
 };
 use static_init::dynamic;
 
-use crate::inference::{ChatRole, Inference, InferenceResult};
+use crate::{chat::{ChatMessage, ChatRole}, inference::{Inference, InferenceResult}};
 
 pub const CONTEXT_WINDOW_SIZE: usize = 4096;
 
@@ -61,13 +61,14 @@ impl Core {
                 CompressionLevel::None => GgmlType::F16,
             });
         let context = self.new_context(ctx_params);
-        Inference::new(&self.model, context, CONTEXT_WINDOW_SIZE)
+        Inference::new(&self.model, context, vec![], CONTEXT_WINDOW_SIZE)
     }
 }
 
 // Text processing utilities
 impl Core {
     /// Summarizes the given text using the model. This is a simple utility function that creates a prompt for summarization and returns the generated summary.
+    /// The `hints` parameter provides additional guidance for the summarization, allowing the user to specify key points or aspects to focus on.
     pub fn summarize(&self, text: &str, hints: &[&str]) -> InferenceResult {
         // Begin a new inference job for summarization
         let mut inference = self.infer();
@@ -89,20 +90,20 @@ impl Core {
             text,
         );
         inference.start_response_to_messages(
-            [
-                (ChatRole::System, system_prompt),
-                (ChatRole::User, user_prompt),
+            &[
+                ChatMessage::new(ChatRole::System, system_prompt),
+                ChatMessage::new(ChatRole::User, user_prompt),
             ],
             false
         );
 
-        // Start the response off with a header
+        // Start the response off with a header and code block
         inference.push_text("## Summary\n```\n");
 
-        // Infer until the end of the message to get the summary
+        // Infer until the end of the code block to get the summary
         let result = inference.infer(Some(CONTEXT_WINDOW_SIZE), &["```"]);
 
-        // We should still end the response to properly terminate it in the context, for future proofing reasons
+        // Terminate the response
         inference.end_response();
 
         result
