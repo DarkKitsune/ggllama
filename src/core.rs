@@ -9,8 +9,8 @@ use llama_cpp_4::{
 use static_init::dynamic;
 
 use crate::{
-    chat::{Chat, ChatMessage, ChatResponse, ChatRole},
-    inference::{Inference, InferenceResult},
+    chat::{Chat, ChatResponse, ChatRole},
+    inference::{Inference},
 };
 
 pub const CONTEXT_WINDOW_SIZE: usize = 4096;
@@ -108,7 +108,6 @@ impl Core {
         // Infer the response from the model
         let result = chat.infer_response(None, &[], None, false);
         
-
         result
     }
 }

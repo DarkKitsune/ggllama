@@ -1,6 +1,6 @@
 use ggllama::{
-    chat::{Chat, ChatRole},
-    core::{CompressionLevel, Core},
+    chat::{ChatRole},
+    core::{CompressionLevel, Core}, json,
 };
 
 fn main() {
@@ -10,15 +10,17 @@ fn main() {
         CompressionLevel::Medium,
     );
 
-    // Start a chat
-    let mut chat = Chat::new(&core, "You are a helpful assistant.");
+    // JSON template
+    let template = json::TemplateNode::object(vec![
+        json::property("name", json::string()),
+        json::property("age", json::number(Some(0.0), Some(120.0))),
+        json::optional_property("is_student", json::boolean()),
+    ]);
 
-    // Push a user message to the chat.
-    chat.push_message(ChatRole::User, "Please give me a short and easy to understand explanation for what a transformer model is. Keep it under 5 sentences. Don't use markdown formatting.");
+    // JSON builder
+    let mut json_builder = json::JsonBuilder::new(&core, &template);
 
-    // Infer the response from the chat.
-    let response = chat.infer_response(None, &[], None, true);
-
-    // Print the response.
-    println!("Response: {:#?}", response);
+    // Build the JSON object
+    let json_object = json_builder.build("Please create a fictional student whose name starts with J and is within 18 to 25 years old.").unwrap();
+    println!("Generated JSON: {}", json_object);
 }

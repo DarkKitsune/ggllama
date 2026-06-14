@@ -235,6 +235,7 @@ dependencies = [
 name = "ggllama"
 version = "0.1.0"
 dependencies = [
+ "aho-corasick",
  "anyhow",
  "encoding_rs",
  "llama-cpp-4",
