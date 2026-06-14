@@ -4,7 +4,8 @@ use llama_cpp_4::{
     context::LlamaContext,
     llama_batch::LlamaBatch,
     model::{AddBos, LlamaChatMessage, LlamaModel, Special},
-    sampling::LlamaSampler, token::LlamaToken,
+    sampling::LlamaSampler,
+    token::LlamaToken,
 };
 
 use crate::chat::{ChatMessage, ChatRole};
@@ -20,14 +21,13 @@ pub struct InferenceResult {
 
 impl InferenceResult {
     /// Get the content with the stop sequence ommitted, if a stop sequence was encountered.
-    pub fn content_without_stop_sequence(&self) -> &str {
+    pub fn get_content_without_stop_sequence(&self) -> &str {
         if let Some(stop_sequence) = &self.encountered_stop_sequence {
-            if let Some(pos) = self.content.find(stop_sequence) {
-                return &self.content[..pos];
-            }
+            assert!(self.content.ends_with(stop_sequence));
+            &self.content[..self.content.len() - stop_sequence.len()]
+        } else {
+            &self.content
         }
-
-        &self.content
     }
 }
 
@@ -103,11 +103,7 @@ impl<'a> Inference<'a> {
     }
 
     /// Moves the content of the queued text into the context, initializing logits for the last token if specified.
-    pub(crate) fn unqueue_to_context(
-        &mut self,
-        text: impl AsRef<str>,
-        is_last_before_infer: bool,
-    ) {
+    pub(crate) fn unqueue_to_context(&mut self, text: impl AsRef<str>, is_last_before_infer: bool) {
         // Tokenize the text and get the length
         let tokens = self
             .model
@@ -168,8 +164,11 @@ impl<'a> Inference<'a> {
         let messages: Vec<_> = messages
             .into_iter()
             .map(|message| {
-                LlamaChatMessage::new(message.role.to_chatml_role().to_string(), message.content.to_string())
-                    .unwrap()
+                LlamaChatMessage::new(
+                    message.role.to_chatml_role().to_string(),
+                    message.content.to_string(),
+                )
+                .unwrap()
             })
             .collect();
         let messages = self
@@ -182,14 +181,8 @@ impl<'a> Inference<'a> {
         // Generate the reasoning trace if reasoning is enabled, otherwise we push an empty reasoning trace
         let reasoning_trace = if reasoning {
             let trace = self.think(None);
-            if trace.is_empty() {
-                None
-            }
-            else {
-                Some(trace)
-            }
-        }
-        else {
+            if trace.is_empty() { None } else { Some(trace) }
+        } else {
             self.no_think();
             None
         };
@@ -206,12 +199,7 @@ impl<'a> Inference<'a> {
         // Generate the reasoning trace if reasoning is enabled, otherwise we push an empty reasoning trace
         let reasoning_trace = if reasoning {
             let trace = self.think(None);
-            if trace.is_empty() {
-                None
-            }
-            else {
-                Some(trace)
-            }
+            if trace.is_empty() { None } else { Some(trace) }
         } else {
             self.no_think();
             None

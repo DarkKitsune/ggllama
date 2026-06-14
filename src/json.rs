@@ -291,7 +291,7 @@ pub trait FromJson: Sized {
         HashMap::new()
     }
 }
-/* 
+/*
 /// Wraps an `Inference` object and allows the construction of JSON objects based on templates defined by `TemplateNode` instances.
 pub struct JsonBuilder<'a> {
     inference: Inference<'a>,

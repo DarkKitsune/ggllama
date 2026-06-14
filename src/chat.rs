@@ -59,7 +59,7 @@ impl<'a> Chat<'a> {
             content: system_prompt.to_string(),
         };
         let all_messages = vec![message.clone()];
-        let queued_messages = vec![message]; 
+        let queued_messages = vec![message];
 
         Self {
             inference,
@@ -93,10 +93,16 @@ impl<'a> Chat<'a> {
     }
 
     /// Infers the next response based on the current chat context.
-    pub fn infer_response(&mut self, max_tokens: Option<usize>, stop_sequences: &[&str], prefix: Option<String>) -> ChatResponse {
+    pub fn infer_response(
+        &mut self,
+        max_tokens: Option<usize>,
+        stop_sequences: &[&str],
+        prefix: Option<String>,
+    ) -> ChatResponse {
         // Start the response to the queued messages
         let queued_messages = self.unqueue_messages();
-        self.inference.start_response_to_messages(&queued_messages, false);
+        self.inference
+            .start_response_to_messages(&queued_messages, false);
 
         // Begin the message with the prefix, if any
         if let Some(prefix) = prefix {
@@ -105,14 +111,17 @@ impl<'a> Chat<'a> {
 
         // Infer the response until one of the stop sequences is encountered
         let response = self.inference.infer(max_tokens, stop_sequences);
-        let response_content = response.content_without_stop_sequence();
+        let response_content = response.get_content_without_stop_sequence();
 
         // End the message
         self.inference.end_response();
 
         // Create a new chat message with the inferred response content, and push it to *just* all_messages (it's already in the context)
-        self.all_messages.push(ChatMessage::new(ChatRole::Assistant, response.content.clone()));
-        
+        self.all_messages.push(ChatMessage::new(
+            ChatRole::Assistant,
+            response_content.to_string(),
+        ));
+
         ChatResponse {
             content: response_content.to_string(),
             encountered_stop_sequence: response.encountered_stop_sequence,

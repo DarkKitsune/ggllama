@@ -3,11 +3,15 @@ use std::{num::NonZeroU32, path::Path};
 use llama_cpp_4::{
     context::{LlamaContext, params::LlamaContextParams},
     llama_backend::LlamaBackend,
-    model::{LlamaModel, params::LlamaModelParams}, quantize::GgmlType,
+    model::{LlamaModel, params::LlamaModelParams},
+    quantize::GgmlType,
 };
 use static_init::dynamic;
 
-use crate::{chat::{ChatMessage, ChatRole}, inference::{Inference, InferenceResult}};
+use crate::{
+    chat::{ChatMessage, ChatRole},
+    inference::{Inference, InferenceResult},
+};
 
 pub const CONTEXT_WINDOW_SIZE: usize = 4096;
 
@@ -37,7 +41,10 @@ impl Core {
         let params = LlamaModelParams::default().with_n_gpu_layers(99);
         let model = LlamaModel::load_from_file(&BACKEND, model_path, &params).unwrap();
 
-        Self { model, compression: context_compression }
+        Self {
+            model,
+            compression: context_compression,
+        }
     }
 
     /// Creates a new context with the specified parameters.
@@ -82,7 +89,10 @@ impl Core {
             - The summary should capture the main points of the text.\n\
             - Do not omit any important details from the text in your summary.\n\
             {}",
-            hints.iter().map(|hint| format!("- {}\n", hint)).collect::<String>(),
+            hints
+                .iter()
+                .map(|hint| format!("- {}\n", hint))
+                .collect::<String>(),
         );
         let user_prompt = format!(
             "## Task:\n\
@@ -94,7 +104,7 @@ impl Core {
                 ChatMessage::new(ChatRole::System, system_prompt),
                 ChatMessage::new(ChatRole::User, user_prompt),
             ],
-            false
+            false,
         );
 
         // Start the response off with a header and code block
