@@ -9,7 +9,7 @@ use llama_cpp_4::{
 use static_init::dynamic;
 
 use crate::{
-    chat::{ChatMessage, ChatRole},
+    chat::{Chat, ChatMessage, ChatResponse, ChatRole},
     inference::{Inference, InferenceResult},
 };
 
@@ -76,11 +76,8 @@ impl Core {
 impl Core {
     /// Summarizes the given text using the model. This is a simple utility function that creates a prompt for summarization and returns the generated summary.
     /// The `hints` parameter provides additional guidance for the summarization, allowing the user to specify key points or aspects to focus on.
-    pub fn summarize(&self, text: &str, hints: &[&str]) -> InferenceResult {
-        // Begin a new inference job for summarization
-        let mut inference = self.infer();
-
-        // Ask the model to summarize the text
+    pub fn summarize(&self, text: &str, hints: &[&str]) -> ChatResponse {
+        // System prompt describing the assistant's role and the summarization task
         let system_prompt = format!(
             "You are a helpful assistant that summarizes text. \
             When given a piece of text, you will produce a concise summary that captures the main points. \
@@ -94,27 +91,23 @@ impl Core {
                 .map(|hint| format!("- {}\n", hint))
                 .collect::<String>(),
         );
+
+        // User prompt Providing the text to be summarized
         let user_prompt = format!(
             "## Task:\n\
-            Summarize the following text in a concise manner:\n```\n{}\n```",
+            Please summarize the following text:\n```\n{}\n```",
             text,
         );
-        inference.start_response_to_messages(
-            &[
-                ChatMessage::new(ChatRole::System, system_prompt),
-                ChatMessage::new(ChatRole::User, user_prompt),
-            ],
-            false,
-        );
 
-        // Start the response off with a header and code block
-        inference.push_text("## Summary\n```\n");
+        // Initialize a new chat session
+        let mut chat = Chat::new(self, system_prompt);
 
-        // Infer until the end of the code block to get the summary
-        let result = inference.infer(Some(CONTEXT_WINDOW_SIZE), &["```"]);
+        // Push the user message containing the text to be summarized
+        chat.push_message(ChatRole::User, user_prompt);
 
-        // Terminate the response
-        inference.end_response();
+        // Infer the response from the model
+        let result = chat.infer_response(None, &[], None, false);
+        
 
         result
     }

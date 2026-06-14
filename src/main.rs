@@ -6,7 +6,7 @@ use ggllama::{
 fn main() {
     // Initialize the core with the model and some KV cache quantization/compression.
     let core = Core::from_model(
-        "models/Qwen3.5-9B-Claude-4.6-HighIQ-INSTRUCT.i1-Q5_K_M.gguf",
+        "models/LFM2.5-8B-A1B-Q5_K_M.gguf",
         CompressionLevel::Medium,
     );
 
@@ -17,8 +17,8 @@ fn main() {
     chat.push_message(ChatRole::User, "Please give me a short and easy to understand explanation for what a transformer model is. Keep it under 5 sentences. Don't use markdown formatting.");
 
     // Infer the response from the chat.
-    let response = chat.infer_response(None, &[], None);
+    let response = chat.infer_response(None, &[], None, true);
 
     // Print the response.
-    println!("Response: {:?}", response);
+    println!("Response: {:#?}", response);
 }

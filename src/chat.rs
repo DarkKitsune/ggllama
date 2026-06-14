@@ -6,6 +6,7 @@ use crate::{core::Core, inference::Inference};
 #[derive(Debug, Clone)]
 pub struct ChatResponse {
     pub content: String,
+    pub reasoning: Option<String>,
     pub encountered_stop_sequence: Option<String>,
     pub inference_tokens_per_second: f32,
     pub prefill_tokens_per_second: f32,
@@ -98,11 +99,12 @@ impl<'a> Chat<'a> {
         max_tokens: Option<usize>,
         stop_sequences: &[&str],
         prefix: Option<String>,
+        use_reasoning: bool,
     ) -> ChatResponse {
         // Start the response to the queued messages
         let queued_messages = self.unqueue_messages();
-        self.inference
-            .start_response_to_messages(&queued_messages, false);
+        let reasoning = self.inference
+            .start_response_to_messages(&queued_messages, use_reasoning);
 
         // Begin the message with the prefix, if any
         if let Some(prefix) = prefix {
@@ -124,6 +126,7 @@ impl<'a> Chat<'a> {
 
         ChatResponse {
             content: response_content.to_string(),
+            reasoning,
             encountered_stop_sequence: response.encountered_stop_sequence,
             inference_tokens_per_second: response.inference_tokens_per_second,
             prefill_tokens_per_second: response.prefill_tokens_per_second,
