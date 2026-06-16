@@ -3,7 +3,7 @@ use std::fmt::Display;
 use crate::{core::Core, inference::Inference};
 
 /// The chat compacts its own context if it exceeds this many tokens
-const DEFAULT_CONTEXT_SIZE_LIMIT: usize = 8192;
+const DEFAULT_CONTEXT_SIZE_LIMIT: usize = 4096;
 const MEMORY_HEADER: &str = "## Your Memory";
 
 /// Represents a response from the assistant in the chat.

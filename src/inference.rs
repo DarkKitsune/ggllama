@@ -101,7 +101,6 @@ impl<'a> Inference<'a> {
         let sampler = LlamaSampler::chain_simple([
             LlamaSampler::min_p(0.05, 1),
             LlamaSampler::adaptive_p(target, 0.9, seed),
-            LlamaSampler::greedy(),
         ]);
 
         // Create batch for decoding tokens into the context
