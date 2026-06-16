@@ -29,6 +29,7 @@ fn main() {
     let mut chat = Chat::new(
         &core,
         "You are a helpful assistant and a pleasant conversational partner.",
+        0.7,
     );
 
     // Simulate a few messages

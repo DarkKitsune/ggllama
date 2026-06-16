@@ -77,10 +77,16 @@ impl<'a> Inference<'a> {
         context: LlamaContext<'a>,
         tokens: Vec<LlamaToken>,
         context_window_length: usize,
+        creativity: f32,
     ) -> Self {
-        // Create adaptive sampler
+        // Calculate the probability target based on creativity
+        // If creativity is very close zero then set target to -1.0 as this makes the adaptive_p sampler a no-op
+        let target = if creativity < 0.0001 { -1.0 } else { (1.0 - creativity * 0.7).clamp(0.3, 1.0) };
+        
+        // Create adaptive sampler which only samples tokens that aren't very unlikely
         let sampler = LlamaSampler::chain_simple([
-            LlamaSampler::adaptive_p(0.87, 0.9, 0),
+            LlamaSampler::min_p(0.05, 1),
+            LlamaSampler::adaptive_p(target, 0.9, 0),
             LlamaSampler::greedy(),
         ]);
 
