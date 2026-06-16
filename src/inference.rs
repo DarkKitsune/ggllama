@@ -13,6 +13,8 @@ use crate::{
     core::Core,
 };
 
+const BATCH_CAPACITY: usize = 4096;
+
 /// A single inference result.
 #[derive(Debug, Clone)]
 pub struct InferenceResult {
@@ -76,13 +78,16 @@ impl<'a> Inference<'a> {
         core: &'a Core,
         context: LlamaContext<'a>,
         tokens: Vec<LlamaToken>,
-        context_window_length: usize,
         creativity: f32,
     ) -> Self {
         // Calculate the probability target based on creativity
         // If creativity is very close zero then set target to -1.0 as this makes the adaptive_p sampler a no-op
-        let target = if creativity < 0.0001 { -1.0 } else { (1.0 - creativity * 0.7).clamp(0.3, 1.0) };
-        
+        let target = if creativity < 0.0001 {
+            -1.0
+        } else {
+            (1.0 - creativity * 0.7).clamp(0.3, 1.0)
+        };
+
         // Create adaptive sampler which only samples tokens that aren't very unlikely
         let sampler = LlamaSampler::chain_simple([
             LlamaSampler::min_p(0.05, 1),
@@ -90,8 +95,8 @@ impl<'a> Inference<'a> {
             LlamaSampler::greedy(),
         ]);
 
-        // Create batch for decoding tokens into the context, with a capacity of 16 tokens (this is just a reasonable default and can be changed later if needed).
-        let batch = LlamaBatch::new(context_window_length, 1);
+        // Create batch for decoding tokens into the context
+        let batch = LlamaBatch::new(BATCH_CAPACITY, 1);
 
         Self {
             core,
@@ -127,27 +132,30 @@ impl<'a> Inference<'a> {
     }
 
     /// Moves the content of the queued text into the context, initializing logits for the last token if specified.
-    pub(crate) fn unqueue_to_context(&mut self, text: impl AsRef<str>, is_last_before_infer: bool) {
+    pub(crate) fn unqueue_to_context(&mut self, is_last_before_infer: bool) {
         // Tokenize the text and get the length
         let tokens = self
             .model()
-            .str_to_token(text.as_ref(), AddBos::Never)
+            .str_to_token(&self.queued_text, AddBos::Never)
             .unwrap();
-        let token_count = tokens.len();
 
-        // Batch the tokens, initializing logits for the last token if this is the last push before generation
-        self.batch.clear();
-        for (pos, token) in tokens.into_iter().enumerate() {
-            // We only initialize logits for the last batch before generation, as those are the only ones that will be read from.
-            let logits = is_last_before_infer && pos == token_count - 1;
-            self.batch
-                .add(token, self.tokens.len() as i32, &[0], logits)
-                .unwrap();
-            self.tokens.push(token);
+        // Group the tokens into chunks of BATCH_CAPACITY tokens.
+        let tokens_chunked: Vec<&[LlamaToken]> = tokens.chunks(BATCH_CAPACITY).collect();
+
+        // Process each chunk, adding the tokens to the context and initializing logits for the last token if specified.
+        for (chunk_idx, token_batch) in tokens_chunked.iter().enumerate() {
+            self.batch.clear();
+            for (idx, &token) in token_batch.iter().enumerate() {
+                let logits = is_last_before_infer
+                    && chunk_idx == tokens_chunked.len() - 1
+                    && idx == token_batch.len() - 1;
+                self.batch
+                    .add(token, self.tokens.len() as i32, &[0], logits)
+                    .unwrap();
+                self.tokens.push(token);
+            }
+            self.context.decode(&mut self.batch).unwrap();
         }
-
-        // Decode the batch into the context, which adds the tokens to the context
-        self.context.decode(&mut self.batch).unwrap();
 
         // Clear the queued text as it has now been moved into the context
         self.queued_text.clear();
@@ -163,7 +171,7 @@ impl<'a> Inference<'a> {
         // We need to properly handle queued text before decoding tokens into the context so...
         // If we have queued text, push it to the context before generating.
         if !self.queued_text.is_empty() {
-            self.unqueue_to_context(self.queued_text.to_string(), true);
+            self.unqueue_to_context(true);
         }
 
         self.batch.clear();
@@ -240,7 +248,7 @@ impl<'a> Inference<'a> {
         let prefill_start_time = std::time::Instant::now();
         let prefill_start_token_count = self.tokens.len();
         if !self.queued_text.is_empty() {
-            self.unqueue_to_context(self.queued_text.to_string(), true);
+            self.unqueue_to_context(true);
         }
         let prefill_end_time = std::time::Instant::now();
         let prefill_duration = prefill_end_time.duration_since(prefill_start_time);
@@ -277,7 +285,7 @@ impl<'a> Inference<'a> {
                     // Truncate the output to the position of the stop sequence + the length of the stop sequence, so that the stop sequence is included in the output.
                     output.truncate(pos + stop_sequence.len());
 
-                    // Get the length of the token after truncating
+                    // Get the length we will need to truncate the token string to
                     let truncated_token_len = output.len() - old_len;
 
                     // Truncate the token string to the truncated token length, so that we only decode the part of the token that is actually in the output. This ensures that the context is consistent with the output, even if we stop early.
@@ -290,6 +298,7 @@ impl<'a> Inference<'a> {
                         .unwrap();
 
                     // Batch the truncated tokens
+                    // We don't chunk here because truncated_tokens should be small anyway
                     self.batch.clear();
                     for (pos, &t) in truncated_tokens.iter().enumerate() {
                         let logits = pos == truncated_tokens.len() - 1;

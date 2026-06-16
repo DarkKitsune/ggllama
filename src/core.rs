@@ -69,7 +69,7 @@ impl Core {
                 CompressionLevel::None => GgmlType::F16,
             });
         let context = self.new_context(ctx_params);
-        Inference::new(self, context, vec![], CONTEXT_SIZE_LIMIT, creativity)
+        Inference::new(self, context, vec![], creativity)
     }
 
     /// Get a reference to the model.
