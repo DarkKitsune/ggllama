@@ -10,10 +10,10 @@ use static_init::dynamic;
 
 use crate::{
     chat::{Chat, ChatResponse, ChatRole},
-    inference::{Inference},
+    inference::Inference,
 };
 
-pub const CONTEXT_WINDOW_SIZE: usize = 4096;
+pub const CONTEXT_SIZE_LIMIT: usize = 8192;
 
 #[dynamic]
 static BACKEND: LlamaBackend = LlamaBackend::init().unwrap();
@@ -56,7 +56,7 @@ impl Core {
     pub fn infer<'a>(&'a self) -> Inference<'a> {
         let ctx_params = LlamaContextParams::default()
             .with_flash_attention(true)
-            .with_n_ctx(Some(NonZeroU32::new(CONTEXT_WINDOW_SIZE as u32).unwrap()))
+            .with_n_ctx(Some(NonZeroU32::new(CONTEXT_SIZE_LIMIT as u32).unwrap()))
             .with_cache_type_k(match self.compression {
                 CompressionLevel::High => GgmlType::Q4_0,
                 CompressionLevel::Medium => GgmlType::Q8_0,
@@ -68,7 +68,12 @@ impl Core {
                 CompressionLevel::None => GgmlType::F16,
             });
         let context = self.new_context(ctx_params);
-        Inference::new(&self.model, context, vec![], CONTEXT_WINDOW_SIZE)
+        Inference::new(self, context, vec![], CONTEXT_SIZE_LIMIT)
+    }
+
+    /// Get a reference to the model.
+    pub(crate) fn model(&self) -> &LlamaModel {
+        &self.model
     }
 }
 
@@ -76,15 +81,14 @@ impl Core {
 impl Core {
     /// Summarizes the given text using the model. This is a simple utility function that creates a prompt for summarization and returns the generated summary.
     /// The `hints` parameter provides additional guidance for the summarization, allowing the user to specify key points or aspects to focus on.
-    pub fn summarize(&self, text: &str, hints: &[&str]) -> ChatResponse {
+    pub fn summarize(&self, text: impl AsRef<str>, hints: &[&str]) -> ChatResponse {
         // System prompt describing the assistant's role and the summarization task
         let system_prompt = format!(
             "You are a helpful assistant that summarizes text. \
             When given a piece of text, you will produce a concise summary that captures the main points. \
             Use the following hints/guidelines to guide your summarization:\n\
             ## Hints/Guidelines:\n\
-            - The summary should capture the main points of the text.\n\
-            - Do not omit any important details from the text in your summary.\n\
+            - The summary should be very short but *must* include any critical information.\n\
             {}",
             hints
                 .iter()
@@ -96,7 +100,7 @@ impl Core {
         let user_prompt = format!(
             "## Task:\n\
             Please summarize the following text:\n```\n{}\n```",
-            text,
+            text.as_ref(),
         );
 
         // Initialize a new chat session
@@ -106,8 +110,13 @@ impl Core {
         chat.push_message(ChatRole::User, user_prompt);
 
         // Infer the response from the model
-        let result = chat.infer_response(None, &[], None, false);
-        
+        let result = chat.infer_response(
+            None,
+            &["```"],
+            Some("Here is the summary:\n```\n".to_string()),
+            false,
+        );
+
         result
     }
 }

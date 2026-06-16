@@ -39,7 +39,10 @@ pub struct TextSection {
 
 impl TextSection {
     pub fn new(name: impl Display, content: impl Display) -> Self {
-        Self { name: name.to_string(), content: content.to_string() }
+        Self {
+            name: name.to_string(),
+            content: content.to_string(),
+        }
     }
 }
 
@@ -60,7 +63,9 @@ pub struct PromptFormatter {
 impl PromptFormatter {
     /// Creates a new `PromptFormatter` with no sections.
     pub fn new() -> Self {
-        Self { sections: Vec::new() }
+        Self {
+            sections: Vec::new(),
+        }
     }
 
     /// Creates a new `PromptFormatter` with the given sections.
@@ -70,7 +75,11 @@ impl PromptFormatter {
 
     /// Formats a prompt by combining all sections and substituting "<|placeholder|>" placeholders with the given data.
     pub fn format(&self, data: &HashMap<String, String>) -> String {
-        self.sections.iter().map(|s| format!("## {}\n{}", s.name(), s.render(data))).collect::<Vec<_>>().join("\n\n")
+        self.sections
+            .iter()
+            .map(|s| format!("## {}\n{}", s.name(), s.render(data)))
+            .collect::<Vec<_>>()
+            .join("\n\n")
     }
 
     /// Returns self with the given section added.
@@ -78,7 +87,7 @@ impl PromptFormatter {
         self.sections.push(Box::new(section));
         self
     }
-    
+
     /// Pushes a new section to the formatter.
     pub fn push(&mut self, section: Box<dyn PromptSection>) {
         self.sections.push(section);

@@ -8,7 +8,10 @@ use llama_cpp_4::{
     token::LlamaToken,
 };
 
-use crate::chat::{ChatMessage, ChatRole};
+use crate::{
+    chat::{ChatMessage, ChatRole},
+    core::Core,
+};
 
 /// A single inference result.
 #[derive(Debug, Clone)]
@@ -39,7 +42,7 @@ pub struct InferenceCheckpoint {
 
 /// Represents an inference job that is currently running, handling the context automatically and providing an API for generating tokens.
 pub struct Inference<'a> {
-    model: &'a LlamaModel,
+    core: &'a Core,
     context: LlamaContext<'a>,
     /// We keep a copy of the tokens in the context, so we can effectively restore, modify, or rewind the context.
     /// This also lets use count the number of tokens in the context.
@@ -70,7 +73,7 @@ impl Display for ChatRole {
 
 impl<'a> Inference<'a> {
     pub(crate) fn new(
-        model: &'a LlamaModel,
+        core: &'a Core,
         context: LlamaContext<'a>,
         tokens: Vec<LlamaToken>,
         context_window_length: usize,
@@ -85,7 +88,7 @@ impl<'a> Inference<'a> {
         let batch = LlamaBatch::new(context_window_length, 1);
 
         Self {
-            model,
+            core,
             context,
             tokens,
             sampler,
@@ -94,8 +97,23 @@ impl<'a> Inference<'a> {
         }
     }
 
+    /// Get a reference to the core.
+    pub(crate) fn core(&self) -> &Core {
+        self.core
+    }
+
+    /// Get a reference to the model.
+    pub(crate) fn model(&self) -> &LlamaModel {
+        self.core.model()
+    }
+
+    /// Get the number of tokens in the context so far.
+    pub fn context_len(&self) -> usize {
+        self.tokens.len()
+    }
+
     /// Create a checkpoint of the current state of the inference job, which can be used to restore the context to this state later.
-    pub fn checkpoint(&self) -> InferenceCheckpoint {
+    pub fn create_checkpoint(&self) -> InferenceCheckpoint {
         InferenceCheckpoint {
             tokens: self.tokens.clone(),
             queued_text: self.queued_text.clone(),
@@ -106,7 +124,7 @@ impl<'a> Inference<'a> {
     pub(crate) fn unqueue_to_context(&mut self, text: impl AsRef<str>, is_last_before_infer: bool) {
         // Tokenize the text and get the length
         let tokens = self
-            .model
+            .model()
             .str_to_token(text.as_ref(), AddBos::Never)
             .unwrap();
         let token_count = tokens.len();
@@ -172,7 +190,7 @@ impl<'a> Inference<'a> {
             })
             .collect();
         let messages = self
-            .model
+            .model()
             .apply_chat_template(None, &messages, true)
             .unwrap();
 
@@ -194,7 +212,7 @@ impl<'a> Inference<'a> {
     /// If `reasoning` is true, then the model will generate a reasoning trace and return it.
     pub fn start_response(&mut self, reasoning: bool) -> Option<String> {
         // Start the assistant message
-        self.push_text(self.model.apply_chat_template(None, &[], true).unwrap());
+        self.push_text(self.model().apply_chat_template(None, &[], true).unwrap());
 
         // Generate the reasoning trace if reasoning is enabled, otherwise we push an empty reasoning trace
         let reasoning_trace = if reasoning {
@@ -233,12 +251,15 @@ impl<'a> Inference<'a> {
             let token = self.sampler.sample(&self.context, -1);
 
             // Exit early if the token is an end-of-sequence token
-            if self.model.is_eog_token(token) {
+            if self.model().is_eog_token(token) {
                 break;
             }
 
             // Convert the token to a string
-            let token_str = self.model.token_to_str(token, Special::Plaintext).unwrap();
+            let token_str = self
+                .model()
+                .token_to_str(token, Special::Plaintext)
+                .unwrap();
 
             // Append the token string to the output after saving the old byte length for truncation
             let old_len = output.len();
@@ -258,7 +279,7 @@ impl<'a> Inference<'a> {
 
                     // Convert the truncated token string back to one or more tokens, so that we can decode it into the context
                     let truncated_tokens = self
-                        .model
+                        .model()
                         .str_to_token(truncated_token_str, AddBos::Never)
                         .unwrap();
 
@@ -340,6 +361,13 @@ impl<'a> Inference<'a> {
 
     /// Terminate the current response message by pushing the EOT token into the context.
     pub fn end_response(&mut self) {
-        self.push_tokens(&[self.model.token_eot()]);
+        self.push_tokens(&[self.model().token_eot()]);
+    }
+
+    /// Reset the inference job, clearing the context and other internal states.
+    pub fn reset(&mut self) {
+        self.context.clear_kv_cache();
+        self.tokens.clear();
+        self.batch.clear();
     }
 }
