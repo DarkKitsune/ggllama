@@ -1,4 +1,4 @@
-use std::fmt::Display;
+use std::{fmt::Display, time::SystemTime};
 
 use llama_cpp_4::{
     context::LlamaContext,
@@ -79,6 +79,7 @@ impl<'a> Inference<'a> {
         context: LlamaContext<'a>,
         tokens: Vec<LlamaToken>,
         creativity: f32,
+        seed: Option<u32>,
     ) -> Self {
         // Calculate the probability target based on creativity
         // If creativity is very close zero then set target to -1.0 as this makes the adaptive_p sampler a no-op
@@ -88,10 +89,18 @@ impl<'a> Inference<'a> {
             (1.0 - creativity * 0.7).clamp(0.3, 1.0)
         };
 
+        // If seed is not provided, use the current time as a seed
+        let seed = seed.unwrap_or_else(|| {
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as u32
+        });
+
         // Create adaptive sampler which only samples tokens that aren't very unlikely
         let sampler = LlamaSampler::chain_simple([
             LlamaSampler::min_p(0.05, 1),
-            LlamaSampler::adaptive_p(target, 0.9, 0),
+            LlamaSampler::adaptive_p(target, 0.9, seed),
             LlamaSampler::greedy(),
         ]);
 

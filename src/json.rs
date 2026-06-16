@@ -327,7 +327,7 @@ impl<'a> JsonBuilder<'a> {
             .format(&hmap!{});
 
         // Start the chat session
-        let chat = Chat::new(core, system_prompt, 0.1);
+        let chat = Chat::new(core, system_prompt, 0.1, None);
 
         JsonBuilder { chat }
     }

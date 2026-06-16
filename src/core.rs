@@ -52,7 +52,7 @@ impl Core {
 
     /// Starts a new inference job with a new context.
     /// The `creativity` parameter controls the randomness of the generated output, with higher values resulting in more creative responses.
-    pub fn infer<'a>(&'a self, creativity: f32) -> Inference<'a> {
+    pub fn infer<'a>(&'a self, creativity: f32, seed: Option<u32>) -> Inference<'a> {
         let ctx_params = LlamaContextParams::default()
             .with_flash_attention(true)
             .with_n_ctx(None)
@@ -67,7 +67,7 @@ impl Core {
                 CompressionLevel::None => GgmlType::F16,
             });
         let context = self.new_context(ctx_params);
-        Inference::new(self, context, vec![], creativity)
+        Inference::new(self, context, vec![], creativity, seed)
     }
 
     /// Get a reference to the model.
@@ -103,7 +103,7 @@ impl Core {
         );
 
         // Initialize a new chat session
-        let mut chat = Chat::new(self, system_prompt, 0.2);
+        let mut chat = Chat::new(self, system_prompt, 0.2, None);
 
         // Push the user message containing the text to be summarized
         chat.push_message(ChatRole::User, user_prompt);

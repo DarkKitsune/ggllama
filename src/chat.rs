@@ -1,9 +1,6 @@
 use std::fmt::Display;
 
-use crate::{
-    core::Core,
-    inference::Inference,
-};
+use crate::{core::Core, inference::Inference};
 
 /// The chat compacts its own context if it exceeds this many tokens
 const DEFAULT_CONTEXT_SIZE_LIMIT: usize = 8192;
@@ -60,11 +57,16 @@ pub struct Chat<'a> {
 impl<'a> Chat<'a> {
     /// Creates a new `Chat` instance.
     /// The `creativity` parameter controls the randomness of the generated output, with higher values resulting in more creative responses.
-    pub fn new(core: &'a Core, system_prompt: impl Display, creativity: f32) -> Self {
+    pub fn new(
+        core: &'a Core,
+        system_prompt: impl Display,
+        creativity: f32,
+        seed: Option<u32>,
+    ) -> Self {
         let system_prompt = system_prompt.to_string();
 
         // Begin inference
-        let inference = core.infer(creativity);
+        let inference = core.infer(creativity, seed);
 
         // Initialize the all_messages and queued_messages vectors with the system prompt
         // We will actually put messages into the Inference's context later when inferring tokens.

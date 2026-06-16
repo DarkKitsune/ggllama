@@ -30,6 +30,7 @@ fn main() {
         &core,
         "You are a helpful assistant and a pleasant conversational partner.",
         0.7,
+        None,
     );
 
     // Simulate a few messages
