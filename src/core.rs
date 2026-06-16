@@ -1,4 +1,4 @@
-use std::{num::NonZeroU32, path::Path};
+use std::path::Path;
 
 use llama_cpp_4::{
     context::{LlamaContext, params::LlamaContextParams},
@@ -12,8 +12,6 @@ use crate::{
     chat::{Chat, ChatResponse, ChatRole},
     inference::Inference,
 };
-
-pub const CONTEXT_SIZE_LIMIT: usize = 8192;
 
 #[dynamic]
 static BACKEND: LlamaBackend = LlamaBackend::init().unwrap();
@@ -57,7 +55,7 @@ impl Core {
     pub fn infer<'a>(&'a self, creativity: f32) -> Inference<'a> {
         let ctx_params = LlamaContextParams::default()
             .with_flash_attention(true)
-            .with_n_ctx(Some(NonZeroU32::new(CONTEXT_SIZE_LIMIT as u32).unwrap()))
+            .with_n_ctx(None)
             .with_cache_type_k(match self.compression {
                 CompressionLevel::High => GgmlType::Q4_0,
                 CompressionLevel::Medium => GgmlType::Q8_0,
