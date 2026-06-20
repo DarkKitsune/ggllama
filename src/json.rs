@@ -3,13 +3,6 @@ use std::{collections::HashMap, fmt::Display};
 use anyhow::Result;
 use serde_json::{Map, Value as JsonValue, json};
 
-use crate::{
-    chat::{Chat, ChatRole},
-    core::Core,
-    hmap,
-    prompt_formatter::{PromptFormatter, TextSection},
-};
-
 /// Represents a node in a JSON template, which can be a primitive type (string, number, boolean), an array, or an object with properties.
 #[derive(Debug, Clone)]
 pub enum TemplateNode {
@@ -296,60 +289,5 @@ pub trait FromJson: Sized {
     /// This should provide a default value for all context key-value pairs expected by the template.
     fn default_input_context() -> HashMap<String, String> {
         HashMap::new()
-    }
-}
-
-/// Wraps a chat session and allows the construction of JSON objects based on templates defined by `TemplateNode` instances.
-pub struct JsonBuilder<'a> {
-    chat: Chat<'a>,
-}
-
-impl<'a> JsonBuilder<'a> {
-    /// Creates a new `JsonBuilder`
-    pub fn new(core: &'a Core, template: &TemplateNode) -> Self {
-        // System prompt describing the role of the chat session in constructing JSON objects from the template's schema
-        let system_prompt = PromptFormatter::new()
-            .with_section(TextSection::new(
-                "Your Role",
-                "You are a helpful assistant, that constructs JSON objects based on a given schema and prompt.\n\
-                The schema is provided in the `Schema` section below, but the user will provide the prompt under a `Prompt` header."
-            ))
-            .with_section(TextSection::new(
-                "Your Task",
-                "You must construct a JSON object that conforms to the schema provided below, based on the user's prompt.\n\
-                When given a prompt you should respond only with a `JSON` header, followed by a code block containing the JSON object.\n\
-                Your response *must* strictly adhere to the schema, but you may be creative within the constraints."
-            ))
-            .with_section(TextSection::new(
-                "Schema",
-                &format!("```json\n{}\n```", template.to_json_schema())
-            ))
-            .format(&hmap!{});
-
-        // Start the chat session
-        let chat = Chat::new(core, system_prompt, 0.1, None);
-
-        JsonBuilder { chat }
-    }
-
-    /// Builds a JSON object according to the template, using the given prompt.
-    pub fn build(&mut self, prompt: &str) -> Result<JsonValue> {
-        // Ask the assistant to generate a JSON object based on the prompt and the template.
-        let user_prompt = PromptFormatter::new()
-            .with_section(TextSection::new("Prompt", prompt))
-            .format(&hmap! {});
-        self.chat.push_message(ChatRole::User, user_prompt);
-
-        // Get the response from the chat assistant
-        let response = self.chat.infer_response(
-            Some(4096),
-            &["```"],
-            Some("## JSON\n```json\n".to_string()),
-            false,
-        );
-
-        // Parse the response as JSON
-        let json: JsonValue = serde_json::from_str(&response.content)?;
-        Ok(json)
     }
 }

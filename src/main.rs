@@ -1,57 +1,48 @@
 use ggllama::{
-    chat::Chat,
     core::{CompressionLevel, Core},
-    json,
+    hmap, json,
 };
 
 fn main() {
     // Initialize the core with the model and some KV cache quantization/compression.
     let core = Core::from_model(
-        "models/Qwen3.5-9B-Claude-4.6-HighIQ-INSTRUCT.i1-Q5_K_M.gguf",
+        "models/Qwen3.5-4B-ARA-heresy-v2.i1-Q5_K_M.gguf",
         CompressionLevel::Medium,
     );
-    /*
-    // JSON template
-    let template = json::TemplateNode::object(vec![
-        json::property("name", json::string()),
-        json::property("age", json::number(Some(0.0), Some(120.0))),
-        json::optional_property("is_student", json::boolean()),
-    ]);
 
-    // JSON builder
-    let mut json_builder = json::JsonBuilder::new(&core, &template);
+    // Create a json builder pipeline
+    let mut json_builder = core.new_json_builder();
 
-    // Build the JSON object
-    let json_object = json_builder.build("Please create a fictional student whose name starts with J and is within 18 to 25 years old.").unwrap();
-    println!("Generated JSON: {}", json_object);
-    */
-    // Start chat
-    let mut chat = Chat::new(
-        &core,
-        "You are a helpful assistant and a pleasant conversational partner.",
-        0.7,
-        None,
-    );
+    // Define inputs
+    let inputs = hmap! {
+        "template" => json::object(vec![
+            json::property("name", json::string()),
+            json::property("age", json::number(Some(0.0), None)),
+            json::property("gender_identity", json::string()),
+            json::property("class", json::one_of(vec!["warrior", "mage", "rogue", "healer"])),
+            json::property("alignment", json::one_of(vec!["good", "neutral", "evil"])),
+            json::property("background", json::object(vec![
+                json::property("origin", json::string()),
+                json::property("upbringing", json::string()),
+                json::property("notable_events", json::array(json::string())),
+            ])),
+        ]),
+        "prompt" => "Come up with an interesting RPG character who uses magic spells to fight.",
+    };
 
-    // Simulate a few messages
-    chat.push_message(ggllama::chat::ChatRole::User, "Hello, I need help testing something. I'm going to give you a list of 5 items. Do you understand?");
+    // Process the inputs through the JSON builder pipeline multiple times to generate outputs.
+    let outputs = (0..3)
+        .map(|_| json_builder.process(&inputs))
+        .collect::<Vec<_>>();
 
-    let response = chat.infer_response(None, &[], None, false);
-    println!("Assistant: {}", response.content);
-
-    chat.push_message(
-        ggllama::chat::ChatRole::User,
-        "Here are the items: 1. Apple 2. Banana 3. Carrot 4. Date 5. Eggplant. You got that?",
-    );
-
-    let response = chat.infer_response(None, &[], None, false);
-    println!("Assistant: {}", response.content);
-
-    chat.push_message(
-        ggllama::chat::ChatRole::User,
-        "Can you repeat the list back to me?",
-    );
-
-    let response = chat.infer_response(None, &[], None, false);
-    println!("Assistant: {}", response.content);
+    // Print the outputs
+    for outputs in &outputs {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &serde_json::from_str::<serde_json::Value>(outputs["output"].as_str()).unwrap()
+            )
+            .unwrap()
+        );
+    }
 }

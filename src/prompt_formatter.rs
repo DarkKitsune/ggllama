@@ -55,6 +55,44 @@ impl PromptSection for TextSection {
     }
 }
 
+/// A numbered/bulleted list section.
+/// If `numbered` is true, the list will be numbered; otherwise, it will be bulleted.
+pub struct ListSection {
+    name: String,
+    numbered: bool,
+    items: Vec<String>,
+}
+
+impl ListSection {
+    pub fn new(name: impl Display, numbered: bool, items: Vec<String>) -> Self {
+        Self {
+            name: name.to_string(),
+            numbered,
+            items,
+        }
+    }
+}
+
+impl PromptSection for ListSection {
+    fn name(&self) -> String {
+        self.name.clone()
+    }
+    fn render(&self, data: &HashMap<String, String>) -> String {
+        self.items
+            .iter()
+            .enumerate()
+            .map(|(i, item)| {
+                if self.numbered {
+                    format!("{}. {}", i + 1, substitute_placeholders(item, data))
+                } else {
+                    format!("- {}", substitute_placeholders(item, data))
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
 /// A formatter that combines multiple prompt sections into a single prompt string.
 pub struct PromptFormatter {
     sections: Vec<Box<dyn PromptSection>>,
@@ -131,5 +169,11 @@ impl PromptFormatter {
     /// Clears all sections from the formatter.
     pub fn clear(&mut self) {
         self.sections.clear();
+    }
+}
+
+impl Display for PromptFormatter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.format(&HashMap::new()))
     }
 }

@@ -1,4 +1,4 @@
-use std::{fmt::Display, time::SystemTime};
+use std::{collections::HashMap, fmt::Display, time::SystemTime};
 
 use llama_cpp_4::{
     context::LlamaContext,
@@ -26,7 +26,7 @@ pub struct InferenceResult {
 
 impl InferenceResult {
     /// Get the content with the stop sequence ommitted, if a stop sequence was encountered.
-    pub fn get_content_without_stop_sequence(&self) -> &str {
+    pub fn content_without_stop_sequence(&self) -> &str {
         if let Some(stop_sequence) = &self.encountered_stop_sequence {
             assert!(self.content.ends_with(stop_sequence));
             &self.content[..self.content.len() - stop_sequence.len()]
@@ -40,6 +40,8 @@ impl InferenceResult {
 pub struct InferenceCheckpoint {
     pub tokens: Vec<LlamaToken>,
     pub queued_text: String,
+    pub response_text: String,
+    pub outputs: HashMap<String, String>,
 }
 
 /// Represents an inference job that is currently running, handling the context automatically and providing an API for generating tokens.
@@ -49,6 +51,12 @@ pub struct Inference<'a> {
     /// We keep a copy of the tokens in the context, so we can effectively restore, modify, or rewind the context.
     /// This also lets use count the number of tokens in the context.
     tokens: Vec<LlamaToken>,
+    /// We also keep a copy of all text for a response as it is generated.
+    response_text: String,
+    /// We also store named inference results as outputs.
+    outputs: HashMap<String, String>,
+    /// Supplied outputs that should be used instead of inferring.
+    supplied_outputs: Option<HashMap<String, String>>,
     sampler: LlamaSampler,
     batch: LlamaBatch,
     /// We queue text that must be added to the context until the next generation call, at which point we add it and then clear the queue.
@@ -112,6 +120,9 @@ impl<'a> Inference<'a> {
             tokens,
             sampler,
             batch,
+            response_text: String::new(),
+            outputs: HashMap::new(),
+            supplied_outputs: None,
             queued_text: String::new(),
         }
     }
@@ -131,11 +142,29 @@ impl<'a> Inference<'a> {
         self.tokens.len()
     }
 
+    /// Get the full text of the current/last response.
+    pub fn response_content(&self) -> &str {
+        &self.response_text
+    }
+
+    /// Get the outputs associated with the current/last response.
+    pub fn outputs(&self) -> &HashMap<String, String> {
+        &self.outputs
+    }
+
+    /// When using infer_output, if a value is found in this map under the given name, it will be used instead of inferring.
+    /// This is useful for things like example generation.
+    pub fn supply_outputs_for_response(&mut self, map: Option<HashMap<String, String>>) {
+        self.supplied_outputs = map;
+    }
+
     /// Create a checkpoint of the current state of the inference job, which can be used to restore the context to this state later.
     pub fn create_checkpoint(&self) -> InferenceCheckpoint {
         InferenceCheckpoint {
             tokens: self.tokens.clone(),
             queued_text: self.queued_text.clone(),
+            outputs: self.outputs.clone(),
+            response_text: self.response_text.clone(),
         }
     }
 
@@ -171,10 +200,14 @@ impl<'a> Inference<'a> {
 
     /// Queue text to be added to the context before the next generation call.
     pub fn push_text(&mut self, text: impl Display) {
+        // Store the text in the response text
+        self.response_text.push_str(&text.to_string());
+
+        // Append the text to the queued text before it is moved into the context
         self.queued_text.push_str(&text.to_string());
     }
 
-    /// Push tokens into the context.
+    /// Push tokens into the context. This should not be used during a message response unless you know what you are doing.
     pub(crate) fn push_tokens(&mut self, tokens: &[LlamaToken]) {
         // We need to properly handle queued text before decoding tokens into the context so...
         // If we have queued text, push it to the context before generating.
@@ -195,11 +228,15 @@ impl<'a> Inference<'a> {
 
     /// Queue messages to be added to the context, then begin the assistant response to said messages.
     /// If `reasoning` is true, then the model will generate a reasoning trace and return it.
-    pub fn start_response_to_messages<'b>(
+    pub(crate) fn start_response_to_messages<'b>(
         &mut self,
         messages: impl IntoIterator<Item = &'b ChatMessage>,
         reasoning: bool,
     ) -> Option<String> {
+        // Clear the stored response text and outputs while messages are being pushed
+        self.response_text.clear();
+        self.outputs.clear();
+
         // Convert the messages into the format expected by the model's chat template system, then apply the chat template to get the final messages as a prompt
         let messages: Vec<_> = messages
             .into_iter()
@@ -218,23 +255,9 @@ impl<'a> Inference<'a> {
 
         self.push_text(messages);
 
-        // Generate the reasoning trace if reasoning is enabled, otherwise we push an empty reasoning trace
-        let reasoning_trace = if reasoning {
-            let trace = self.think(None);
-            if trace.is_empty() { None } else { Some(trace) }
-        } else {
-            self.no_think();
-            None
-        };
-
-        reasoning_trace
-    }
-
-    /// Begin the assistant response message without pushing any user or system messages first.
-    /// If `reasoning` is true, then the model will generate a reasoning trace and return it.
-    pub fn start_response(&mut self, reasoning: bool) -> Option<String> {
-        // Start the assistant message
-        self.push_text(self.model().apply_chat_template(None, &[], true).unwrap());
+        // Clear the stored response text and outputs for the start of the actual response
+        self.response_text.clear();
+        self.outputs.clear();
 
         // Generate the reasoning trace if reasoning is enabled, otherwise we push an empty reasoning trace
         let reasoning_trace = if reasoning {
@@ -248,8 +271,10 @@ impl<'a> Inference<'a> {
         reasoning_trace
     }
 
-    /// Infer the next `max_tokens` tokens into the chat context. If this is an assistant message, then use `start_response` to push the user and system messages first, then call this method.
-    /// If `stop_sequences` is provided, generation will stop as soon as any of the sequences are generated (including the stop sequence in the output).
+    /// Infer the next `max_tokens` tokens into the chat context.
+    /// If this is an assistant message, then use `start_response_to_messages` to push the user and system messages first, then call this method.
+    /// If `stop_sequences` is provided, generation will stop as soon as any of the sequences are generated.
+    /// The encountered stop sequence will be included in the output, as well as remaining in the internal context.
     pub fn infer(&mut self, max_tokens: Option<usize>, stop_sequences: &[&str]) -> InferenceResult {
         // If we have queued text, push it to the context before generating.
         // Also measure this as prefill timing
@@ -277,11 +302,11 @@ impl<'a> Inference<'a> {
                 break;
             }
 
-            // Convert the token to a string
+            // Convert the token to a string, or use an empty string if conversion fails
             let token_str = self
                 .model()
                 .token_to_str(token, Special::Plaintext)
-                .unwrap();
+                .unwrap_or_default();
 
             // Append the token string to the output after saving the old byte length for truncation
             let old_len = output.len();
@@ -296,8 +321,11 @@ impl<'a> Inference<'a> {
                     // Get the length we will need to truncate the token string to
                     let truncated_token_len = output.len() - old_len;
 
-                    // Truncate the token string to the truncated token length, so that we only decode the part of the token that is actually in the output. This ensures that the context is consistent with the output, even if we stop early.
+                    // Truncate the token string to the truncated token length
                     let truncated_token_str = &token_str[..truncated_token_len];
+
+                    // Save the truncated token string to the response text
+                    self.response_text.push_str(truncated_token_str);
 
                     // Convert the truncated token string back to one or more tokens, so that we can decode it into the context
                     let truncated_tokens = self
@@ -330,6 +358,9 @@ impl<'a> Inference<'a> {
                 break;
             }
 
+            // Append the token string to the response text
+            self.response_text.push_str(&token_str);
+
             // Set the batch contents to the token and position of the generated token, with logits initialized
             self.batch.clear();
             self.batch
@@ -355,6 +386,37 @@ impl<'a> Inference<'a> {
         }
     }
 
+    /// Infer with output handling. The result is stored in the outputs map under the given name.
+    /// If a value is found in the supplied outputs under the given name, it will be used instead of inferring.
+    pub fn infer_output(&mut self, name: impl Display, stop_sequences: &[&str]) {
+        // Check if a value is supplied for this output name and use it if available.
+        let mut encountered = None;
+        if let Some(supplied_outputs) = &self.supplied_outputs {
+            if let Some(value) = supplied_outputs.get(&name.to_string()) {
+                encountered = Some(value.clone());
+            }
+        }
+
+        // If a supplied value was found, use it.
+        if let Some(value) = encountered {
+            // Push the supplied value into the context.
+            self.push_text(&value);
+
+            // Insert the supplied value into the outputs map.
+            self.outputs.insert(name.to_string(), value);
+            return;
+        }
+
+        // If no supplied value is found, perform inference.
+        let result = self.infer(None, stop_sequences);
+
+        // Insert the inferred result into the outputs map.
+        self.outputs.insert(
+            name.to_string(),
+            result.content_without_stop_sequence().trim().to_string(),
+        );
+    }
+
     /// Generate a reasoning trace in the context, and return the string.
     pub(crate) fn think(&mut self, max_tokens: Option<usize>) -> String {
         // Start the <think> block
@@ -374,21 +436,24 @@ impl<'a> Inference<'a> {
             self.push_text("</think>");
         }
 
+        // Push a newline
+        self.push_text("\n");
+
         result.trim().to_string()
     }
 
     /// Push an empty reasoning trace into the context, causing the model to not use its reasoning capabilities (AKA thinking "disabled").
     pub(crate) fn no_think(&mut self) {
-        self.push_text("<think>\n\n</think>");
+        self.push_text("<think>\n\n</think>\n");
     }
 
     /// Terminate the current response message by pushing the EOT token into the context.
-    pub fn end_response(&mut self) {
+    pub(crate) fn end_response(&mut self) {
         self.push_tokens(&[self.model().token_eot()]);
     }
 
     /// Reset the inference job, clearing the context and other internal states.
-    pub fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         self.context.clear_kv_cache();
         self.tokens.clear();
         self.batch.clear();

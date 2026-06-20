@@ -10,6 +10,7 @@ inherits = "release"
 inherits = "release"
 
 [dependencies]
+ggutil = { path = "../ggutil" }
 llama-cpp-4 = { version = "0.3.1", features = ["cuda"] }
 static_init = "1.0"
 encoding_rs = "0.8"

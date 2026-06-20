@@ -1,6 +1,6 @@
-use std::fmt::Display;
+use std::{collections::HashMap, fmt::Display};
 
-use crate::{core::Core, inference::Inference};
+use crate::{core::Core, hmap, inference::Inference};
 
 /// The chat compacts its own context if it exceeds this many tokens
 const DEFAULT_CONTEXT_SIZE_LIMIT: usize = 4096;
@@ -117,14 +117,14 @@ impl<'a> Chat<'a> {
         self.all_messages.push(message);
     }
 
-    /// Infers the next response based on the current chat context.
-    pub fn infer_response(
+    /// Begins inferring the next response based on the current chat context.
+    /// The `Inference` object is passed to the provided function along with an optional reasoning trace if `use_reasoning` was `true`.
+    /// The function should return a tuple containing the result of the inference and the full content of the response (or an approximation, at least).
+    pub fn infer_response_ext<R>(
         &mut self,
-        max_tokens: Option<usize>,
-        stop_sequences: &[&str],
-        prefix: Option<String>,
         use_reasoning: bool,
-    ) -> ChatResponse {
+        mut func: impl FnMut(&mut Inference<'a>, Option<String>) -> R,
+    ) -> R {
         // Compact the context if it exceeds the context size limit
         self.compact_context();
 
@@ -136,29 +136,54 @@ impl<'a> Chat<'a> {
             .inference
             .start_response_to_messages(&queued_messages, use_reasoning);
 
-        // Begin the message with the prefix, if any
-        if let Some(prefix) = prefix {
-            self.inference.push_text(prefix);
-        }
-
-        // Infer the response until one of the stop sequences is encountered
-        let response = self.inference.infer(max_tokens, stop_sequences);
-        let response_content = response.get_content_without_stop_sequence().trim();
+        // Call the provided function with the inference and reasoning trace
+        let response = func(&mut self.inference, reasoning);
 
         // End the message
         self.inference.end_response();
 
         // Create a new chat message with the inferred response content, and push it to *just* all_messages (it's already in the context)
-        self.all_messages
-            .push(ChatMessage::new(ChatRole::Assistant, response_content));
+        let response_content = self.inference.response_content();
+        self.all_messages.push(ChatMessage::new(
+            ChatRole::Assistant,
+            response_content.to_string(),
+        ));
 
-        ChatResponse {
-            content: response_content.to_string(),
-            reasoning,
-            encountered_stop_sequence: response.encountered_stop_sequence,
-            inference_tokens_per_second: response.inference_tokens_per_second,
-            prefill_tokens_per_second: response.prefill_tokens_per_second,
-        }
+        response
+    }
+
+    /// Infers the next response based on the current chat context.
+    pub fn infer_response(
+        &mut self,
+        max_tokens: Option<usize>,
+        stop_sequences: &[&str],
+        prefix: Option<String>,
+        use_reasoning: bool,
+    ) -> ChatResponse {
+        self.infer_response_ext(use_reasoning, |inference, reasoning| {
+            // Begin the message with the prefix, if any
+            if let Some(prefix) = &prefix {
+                inference.push_text(prefix);
+            }
+
+            // Infer the response until one of the stop sequences is encountered
+            let response = inference.infer(max_tokens, stop_sequences);
+
+            ChatResponse {
+                content: response.content_without_stop_sequence().trim().to_string(),
+                reasoning,
+                encountered_stop_sequence: response.encountered_stop_sequence,
+                inference_tokens_per_second: response.inference_tokens_per_second,
+                prefill_tokens_per_second: response.prefill_tokens_per_second,
+            }
+        })
+    }
+
+    /// Supplies the outputs for the response.
+    /// When using `Inference::infer_output`, if a value is found in this map under the given name, it will be used instead of inferring.
+    /// This is useful for things like example generation.
+    pub fn supply_outputs_for_response(&mut self, map: Option<HashMap<String, String>>) {
+        self.inference.supply_outputs_for_response(map);
     }
 
     /// Compacts the chat context if it exceeds the context size limit.
@@ -193,13 +218,16 @@ impl<'a> Chat<'a> {
                 .join("\n\n");
 
             // Summarize the messages
-            let summary = self.inference.core().summarize(
-                chat_log,
-                &[
-                    "The text that you will summarize is a conversation between the assistant (you) and the user, which you must summarize for easier understanding.",
-                    "Ensure the summary ends by referring to the final message in the conversation."
-                ]
-            ).content;
+            let summary = {
+                // Create summarizer pipeline
+                let mut summarizer = self.inference.core().new_summarizer();
+
+                // Process the chat log through the summarizer
+                summarizer.process(&hmap! {
+                    "input" => chat_log
+                })["output"]
+                    .to_string()
+            };
 
             // Append a memory section to the system prompt if it is not already there
             if !self.system_prompt.contains(MEMORY_HEADER) {
