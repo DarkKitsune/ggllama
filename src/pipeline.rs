@@ -21,7 +21,6 @@ impl<'a> Pipeline<'a> {
     pub fn new(
         core: &'a Core,
         creativity: f32,
-        use_reasoning: bool,
         use_persistent_memory: bool,
         mut system_fn: impl FnMut(PromptFormatter) -> PromptFormatter + 'static,
         mut input_fn: impl FnMut(PromptFormatter, &HashMap<String, String>) -> PromptFormatter + 'static,
@@ -46,7 +45,7 @@ impl<'a> Pipeline<'a> {
             chat.supply_outputs_for_response(Some(outputs.clone()));
 
             // Infer the outputs based on the current state of the chat and the inputs
-            chat.infer_response_ext(use_reasoning, |inference, _reasoning| {
+            chat.infer_response_ext(false, |inference, _reasoning| {
                 // Call the output function to populate the outputs. We don't do anything else as this should modify the context already.
                 (output_fn)(inference, inputs);
             });

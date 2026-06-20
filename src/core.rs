@@ -132,7 +132,6 @@ impl Core {
             self,
             0.2,
             false,
-            false,
             summarization_system,
             summarization_input,
             summarization_output,
@@ -190,7 +189,6 @@ impl Core {
         Pipeline::new(
             self,
             0.4,
-            false,
             false,
             json_builder_system,
             json_builder_input,
