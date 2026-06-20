@@ -1,10 +1,24 @@
 use std::{collections::HashMap, fmt::Display};
 
-use crate::{core::Core, hmap, inference::Inference};
+use crate::{
+    core::Core,
+    hmap,
+    inference::{Inference, InferenceCheckpoint},
+};
 
 /// The chat compacts its own context if it exceeds this many tokens
 const DEFAULT_CONTEXT_SIZE_LIMIT: usize = 4096;
 const MEMORY_HEADER: &str = "## Your Memory";
+
+/// A checkpoint storing the state of a `Chat`.
+#[derive(Debug, Clone)]
+pub struct ChatCheckpoint {
+    inference_checkpoint: InferenceCheckpoint,
+    system_prompt: String,
+    all_messages: Vec<ChatMessage>,
+    queued_messages: Vec<ChatMessage>,
+    context_size_limit: usize,
+}
 
 /// Represents a response from the assistant in the chat.
 #[derive(Debug, Clone)]
@@ -177,6 +191,27 @@ impl<'a> Chat<'a> {
                 prefill_tokens_per_second: response.prefill_tokens_per_second,
             }
         })
+    }
+
+    /// Creates a checkpoint from the current state of the chat.
+    pub(crate) fn create_checkpoint(&self) -> ChatCheckpoint {
+        ChatCheckpoint {
+            inference_checkpoint: self.inference.create_checkpoint(),
+            system_prompt: self.system_prompt.clone(),
+            all_messages: self.all_messages.clone(),
+            queued_messages: self.queued_messages.clone(),
+            context_size_limit: self.context_size_limit,
+        }
+    }
+
+    /// Restores to a previously created checkpoint.
+    pub(crate) fn restore_checkpoint(&mut self, checkpoint: ChatCheckpoint) {
+        self.inference
+            .restore_checkpoint(checkpoint.inference_checkpoint);
+        self.system_prompt = checkpoint.system_prompt;
+        self.all_messages = checkpoint.all_messages;
+        self.queued_messages = checkpoint.queued_messages;
+        self.context_size_limit = checkpoint.context_size_limit;
     }
 
     /// Supplies the outputs for the response.

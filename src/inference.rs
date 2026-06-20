@@ -37,11 +37,13 @@ impl InferenceResult {
 }
 
 /// A stored checkpoint of an inference job, which can be used to resume/rewind an inference job by restoring the context to the state it was in when the checkpoint was taken.
+#[derive(Debug, Clone)]
 pub struct InferenceCheckpoint {
     pub tokens: Vec<LlamaToken>,
     pub queued_text: String,
     pub response_text: String,
     pub outputs: HashMap<String, String>,
+    pub supplied_outputs: Option<HashMap<String, String>>,
 }
 
 /// Represents an inference job that is currently running, handling the context automatically and providing an API for generating tokens.
@@ -94,7 +96,7 @@ impl<'a> Inference<'a> {
         let target = if creativity < 0.0001 {
             -1.0
         } else {
-            (1.0 - creativity * 0.7).clamp(0.3, 1.0)
+            (1.0 - creativity * 0.67).clamp(0.33, 1.0)
         };
 
         // If seed is not provided, use the current time as a seed
@@ -165,7 +167,24 @@ impl<'a> Inference<'a> {
             queued_text: self.queued_text.clone(),
             outputs: self.outputs.clone(),
             response_text: self.response_text.clone(),
+            supplied_outputs: self.supplied_outputs.clone(),
         }
+    }
+
+    /// Restore the context to a previously created checkpoint.
+    pub fn restore_checkpoint(&mut self, checkpoint: InferenceCheckpoint) {
+        // Assert that the first checkpoint.tokens.len() tokens in self.tokens match the checkpoint tokens.
+        assert_eq!(
+            &self.tokens[..checkpoint.tokens.len()],
+            &checkpoint.tokens,
+            "Checkpoint does not appear to match the current context"
+        );
+
+        self.truncate(checkpoint.tokens.len());
+        self.queued_text = checkpoint.queued_text;
+        self.outputs = checkpoint.outputs;
+        self.response_text = checkpoint.response_text;
+        self.supplied_outputs = checkpoint.supplied_outputs;
     }
 
     /// Moves the content of the queued text into the context, initializing logits for the last token if specified.
@@ -215,15 +234,18 @@ impl<'a> Inference<'a> {
             self.unqueue_to_context(true);
         }
 
-        self.batch.clear();
-        for (idx, &token) in tokens.iter().enumerate() {
-            let logits = idx == tokens.len() - 1;
-            self.batch
-                .add(token, self.tokens.len() as i32, &[0], logits)
-                .unwrap();
-            self.tokens.push(token);
+        for (chunk_idx, chunk_tokens) in tokens.chunks(BATCH_CAPACITY).enumerate() {
+            self.batch.clear();
+            for (idx, &token) in chunk_tokens.iter().enumerate() {
+                let logits = chunk_idx == (tokens.chunks(BATCH_CAPACITY).count() - 1)
+                    && idx == chunk_tokens.len() - 1;
+                self.batch
+                    .add(token, self.tokens.len() as i32, &[0], logits)
+                    .unwrap();
+                self.tokens.push(token);
+            }
+            self.context.decode(&mut self.batch).unwrap();
         }
-        self.context.decode(&mut self.batch).unwrap();
     }
 
     /// Queue messages to be added to the context, then begin the assistant response to said messages.
@@ -457,5 +479,30 @@ impl<'a> Inference<'a> {
         self.context.clear_kv_cache();
         self.tokens.clear();
         self.batch.clear();
+        self.queued_text.clear();
+        self.outputs.clear();
+        self.response_text.clear();
+    }
+
+    /// Truncate the context to a specific length. Should only be used when loading a checkpoint.
+    pub(crate) fn truncate(&mut self, length: usize) {
+        assert!(
+            length <= self.tokens.len(),
+            "Cannot truncate context to a length greater than the current token length"
+        );
+
+        // We need to properly handle queued text before decoding tokens into the context so...
+        // If we have queued text, push it to the context before generating.
+        if !self.queued_text.is_empty() {
+            self.unqueue_to_context(true);
+        }
+
+        self.tokens.truncate(length);
+        self.context
+            .clear_kv_cache_seq(Some(0), Some(length as u32), None)
+            .unwrap();
+        self.batch.clear();
+        self.outputs.clear();
+        self.response_text.clear();
     }
 }
