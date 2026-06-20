@@ -196,4 +196,100 @@ impl Core {
             &[],
         )
     }
+
+    /// Creates a new pipeline for answering multiple-choice questions.
+    /// The input hashmap should contain a "question" key with the question text,
+    /// and an "options" key with the possible answer options separated by '|'.
+    /// The output will be provided under the "output" key in the output hashmap.
+    /// There can only be up to 26 options, corresponding to letters A-Z.
+    pub fn new_multiple_choice<'a>(&'a self, role: impl Display + 'static) -> Pipeline<'a> {
+        /// Map options to letters (A, B, C, ...)
+        const IDX_TO_LETTER: [char; 26] = [
+            'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q',
+            'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z',
+        ];
+
+        /// Defines the structure of the system prompt.
+        fn multiple_choice_system(formatter: PromptFormatter, role: String) -> PromptFormatter {
+            formatter
+                .with_section(TextSection::new(
+                    "Your Role",
+                    role
+                ))
+                .with_section(TextSection::new(
+                    "How to Answer",
+                    "Respond with '{\"answer\": \"<letter>\"}' where <letter> is the letter corresponding to the correct answer. \
+                    For example, if the options are 'A. `Option 1` | B. `Option 2` | C. `Option 3`', and the correct answer is 'Option 2', you should respond with '{\"answer\": \"B\"}'."
+                ))
+        }
+
+        /// Defines the structure of the input.
+        fn multiple_choice_input(
+            formatter: PromptFormatter,
+            inputs: &HashMap<String, String>,
+        ) -> PromptFormatter {
+            formatter
+                .with_section(TextSection::new("Question", &inputs["question"]))
+                // Split the options by '|', limit the number, and append the corresponding letters
+                .with_section(TextSection::new(
+                    "Options",
+                    &inputs["options"]
+                        .split('|')
+                        .map(|s| s.trim())
+                        .take(IDX_TO_LETTER.len())
+                        .enumerate()
+                        .map(|(i, option)| format!("{}. `{}`", IDX_TO_LETTER[i], option))
+                        .collect::<Vec<_>>()
+                        .join(" | "),
+                ))
+        }
+
+        /// Defines the structure of the output.
+        fn multiple_choice_output(inference: &mut Inference, inputs: &HashMap<String, String>) {
+            // Format the output as a JSON object containing the answer letter.
+            inference.push_text("```json\n{\"answer\": \"");
+
+            // Loop until a valid answer letter and index is found.
+            let checkpoint = inference.create_checkpoint();
+            let mut answer_index: Option<usize> = None;
+            let mut output = &mut String::new();
+            while answer_index.is_none() {
+                inference.restore_checkpoint(checkpoint.clone());
+
+                // Output the grade letter from the model.
+                output = inference.infer_output("output", &["\"}", "}"]);
+
+                // Look up the index of the answer letter in IDX_TO_LETTER using the first character of output
+                let answer_letter = output.chars().next().unwrap_or(' ');
+                answer_index = IDX_TO_LETTER.iter().position(|&c| c == answer_letter);
+            }
+            // At this point, answer_index is guaranteed to be Some, so unwrap is safe.
+            let answer_index = answer_index.unwrap();
+
+            // Retrieve the answer text using the answer index, and store it in the output variable.
+            *output = inputs["options"]
+                .split('|')
+                .map(|s| s.trim())
+                .take(IDX_TO_LETTER.len())
+                .enumerate()
+                .find(|(i, _)| *i == answer_index)
+                .map(|(_, option)| option)
+                .unwrap()
+                .to_string();
+
+            // End the code block already
+            inference.push_text("\n```");
+        }
+
+        // Create a multiple-choice pipeline
+        Pipeline::new(
+            self,
+            0.0,
+            false,
+            move |formatter| multiple_choice_system(formatter, role.to_string()),
+            multiple_choice_input,
+            multiple_choice_output,
+            &[],
+        )
+    }
 }

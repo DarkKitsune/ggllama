@@ -195,14 +195,23 @@ impl<'a> Inference<'a> {
         self.queued_text.clear();
         self.outputs.clear();
         self.response_text.clear();
+        if let Some(supplied_outputs) = &mut self.supplied_outputs {
+            supplied_outputs.clear();
+        }
     }
 
     /// Truncate the context to a specific length. Should only be used when loading a checkpoint.
+    /// Returns true if truncation was performed, false if no truncation was needed.
     pub(crate) fn truncate(&mut self, length: usize) {
         assert!(
             length <= self.tokens.len(),
             "Cannot truncate context to a length greater than the current token length"
         );
+
+        // If the requested length is equal to the current token length, no truncation is needed.
+        if length == self.tokens.len() {
+            return;
+        }
 
         // We need to properly handle queued text before decoding tokens into the context so...
         // If we have queued text, push it to the context before generating.
@@ -217,6 +226,9 @@ impl<'a> Inference<'a> {
         self.batch.clear();
         self.outputs.clear();
         self.response_text.clear();
+        if let Some(supplied_outputs) = &mut self.supplied_outputs {
+            supplied_outputs.clear();
+        }
     }
 
     /// Moves the content of the queued text into the context, initializing logits for the last token if specified.
@@ -442,11 +454,14 @@ impl<'a> Inference<'a> {
 
     /// Infer with output handling. The result is stored in the outputs map under the given name.
     /// If a value is found in the supplied outputs under the given name, it will be used instead of inferring.
-    pub fn infer_output(&mut self, name: impl Display, stop_sequences: &[&str]) {
+    /// Also returns a mutable reference to the value stored in the outputs map under the given name, allowing further manipulation.
+    pub fn infer_output(&mut self, name: impl Display, stop_sequences: &[&str]) -> &mut String {
+        let name = name.to_string();
+
         // Check if a value is supplied for this output name and use it if available.
         let mut encountered = None;
         if let Some(supplied_outputs) = &self.supplied_outputs {
-            if let Some(value) = supplied_outputs.get(&name.to_string()) {
+            if let Some(value) = supplied_outputs.get(&name) {
                 encountered = Some(value.clone());
             }
         }
@@ -457,8 +472,10 @@ impl<'a> Inference<'a> {
             self.push_text(&value);
 
             // Insert the supplied value into the outputs map.
-            self.outputs.insert(name.to_string(), value);
-            return;
+            self.outputs.insert(name.clone(), value);
+
+            // Return a mutable reference to the value in the outputs map.
+            return self.outputs.get_mut(&name).unwrap();
         }
 
         // If no supplied value is found, perform inference.
@@ -466,9 +483,12 @@ impl<'a> Inference<'a> {
 
         // Insert the inferred result into the outputs map.
         self.outputs.insert(
-            name.to_string(),
+            name.clone(),
             result.content_without_stop_sequence().trim().to_string(),
         );
+
+        // Return a mutable reference to the value in the outputs map.
+        self.outputs.get_mut(&name).unwrap()
     }
 
     /// Generate a reasoning trace in the context, and return the string.

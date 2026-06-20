@@ -1,6 +1,6 @@
 use ggllama::{
     core::{CompressionLevel, Core},
-    hmap, json,
+    hmap,
 };
 
 fn main() {
@@ -10,39 +10,23 @@ fn main() {
         CompressionLevel::Medium,
     );
 
-    // Create a json builder pipeline
-    let mut json_builder = core.new_json_builder();
+    // Create a multiple-choice pipeline
+    let mut multiple_choice =
+        core.new_multiple_choice("You are an expert in RPG character creation.");
 
-    // Define inputs
     let inputs = hmap! {
-        "template" => json::object(vec![
-            json::property("name", json::string()),
-            json::property("age", json::number(Some(0.0), None)),
-            json::property("gender_identity", json::string()),
-            json::property("class", json::one_of(vec!["warrior", "mage", "rogue", "healer"])),
-            json::property("alignment", json::one_of(vec!["good", "neutral", "evil"])),
-            json::property("background", json::object(vec![
-                json::property("origin", json::string()),
-                json::property("upbringing", json::string()),
-                json::property("notable_events", json::array(json::string())),
-            ])),
-        ]),
-        "prompt" => "Come up with an interesting RPG character who uses magic spells to fight.",
+        "question" => "What is the best class for a magic-using character?",
+        "options" => "Warrior|Mage|Rogue|Healer",
     };
 
-    // Process the inputs through the JSON builder pipeline multiple times to generate outputs.
-    let outputs = (0..3)
-        .map(|_| json_builder.process(&inputs))
-        .collect::<Vec<_>>();
+    let outputs = multiple_choice.process(&inputs);
+    println!("{}", outputs["output"]);
 
-    // Print the outputs
-    for outputs in &outputs {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(
-                &serde_json::from_str::<serde_json::Value>(outputs["output"].as_str()).unwrap()
-            )
-            .unwrap()
-        );
-    }
+    let inputs = hmap! {
+        "question" => "What is the best class for a melee-focused character?",
+        "options" => "Warrior|Mage|Rogue|Healer",
+    };
+
+    let outputs = multiple_choice.process(&inputs);
+    println!("{}", outputs["output"]);
 }
