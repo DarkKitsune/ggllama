@@ -173,6 +173,17 @@ impl<'a> Inference<'a> {
 
     /// Restore the context to a previously created checkpoint.
     pub fn restore_checkpoint(&mut self, checkpoint: InferenceCheckpoint) {
+        // If the requested length is equal to the current token length, and the rest of the checkpoint matches, exit early.
+        // This makes it a no-op at the beginning of a checkpoint-validate-restore loop if it comes before any inference.
+        if checkpoint.tokens.len() == self.tokens.len()
+            && checkpoint.queued_text == self.queued_text
+            && checkpoint.outputs == self.outputs
+            && checkpoint.response_text == self.response_text
+            && checkpoint.supplied_outputs == self.supplied_outputs
+            {
+            return;
+        }
+
         // Assert that the first checkpoint.tokens.len() tokens in self.tokens match the checkpoint tokens.
         assert_eq!(
             &self.tokens[..checkpoint.tokens.len()],
@@ -200,18 +211,14 @@ impl<'a> Inference<'a> {
         }
     }
 
-    /// Truncate the context to a specific length. Should only be used when loading a checkpoint.
+    /// Truncate the context to a specific length.
+    /// This should only be used when restoring to a checkpoint!!
     /// Returns true if truncation was performed, false if no truncation was needed.
     pub(crate) fn truncate(&mut self, length: usize) {
         assert!(
             length <= self.tokens.len(),
             "Cannot truncate context to a length greater than the current token length"
         );
-
-        // If the requested length is equal to the current token length, no truncation is needed.
-        if length == self.tokens.len() {
-            return;
-        }
 
         // We need to properly handle queued text before decoding tokens into the context so...
         // If we have queued text, push it to the context before generating.
