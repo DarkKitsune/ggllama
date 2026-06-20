@@ -188,58 +188,12 @@ impl Core {
         // Create a JSON builder pipeline
         Pipeline::new(
             self,
-            0.4,
+            0.6,
             false,
             json_builder_system,
             json_builder_input,
             json_builder_output,
-            &[
-                /*
-                ( // Example 1
-                    hmap! {
-                        "template" => json::object(vec![
-                            json::property("name", json::string()),
-                            json::property("age", json::number(Some(0.0), None)),
-                            json::optional_property("email", json::string()),
-                            json::optional_property("address", json::string()),
-                        ]),
-                        "prompt" => "Generate a person named John Doe who is 31 years old and lives at 123 Main St. Riverville, Phennsyldelphia, USA.",
-                    },
-                    hmap! {
-                        "output" =>
-"{
-    \"name\": \"John Doe\",
-    \"age\": 31,
-    \"address\": \"123 Main St. Riverville, Phennsyldelphia, USA\"
-}",
-                    }
-                ),
-                ( // Example 2
-                    hmap! {
-                        "template" => json::object(vec![
-                            json::property("recipient", json::string()),
-                            json::property("subject", json::string()),
-                            json::property("body", json::object(vec![
-                                json::property("tone", json::one_of(vec!["neutral", "happy", "scared", "upset", "other"])),
-                                json::property("content", json::string()),
-                            ])),
-                        ]),
-                        "prompt" => "Write a nasty email to alice.mcverson@flymail.com about her outburst at the team meeting.",
-                    },
-                    hmap! {
-                        "output" =>
-                        "{
-    \"recipient\": \"alice.mcverson@flymail.com\",
-    \"subject\": \"Outburst at the Team Meeting\",
-    \"body\": {
-        \"tone\": \"upset\",
-        \"content\": \"Your behavior at the team meeting was completely unacceptable. You disrupted the discussion and showed a lack of respect for your colleagues.\"
-    }
-}",
-                    }
-                )
-                */
-            ],
+            &[],
         )
     }
 }

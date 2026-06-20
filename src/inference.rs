@@ -287,7 +287,7 @@ impl<'a> Inference<'a> {
         messages: impl IntoIterator<Item = &'b ChatMessage>,
         reasoning: bool,
     ) -> Option<String> {
-        // Clear the stored response text and outputs while messages are being pushed
+        // Clear the stored response text and outputs while messages and reasoning are being processed
         self.response_text.clear();
         self.outputs.clear();
 
@@ -309,10 +309,6 @@ impl<'a> Inference<'a> {
 
         self.push_text(messages);
 
-        // Clear the stored response text and outputs for the start of the actual response
-        self.response_text.clear();
-        self.outputs.clear();
-
         // Generate the reasoning trace if reasoning is enabled, otherwise we push an empty reasoning trace
         let reasoning_trace = if reasoning {
             let trace = self.think(None);
@@ -321,6 +317,10 @@ impl<'a> Inference<'a> {
             self.no_think();
             None
         };
+
+        // Clear the stored response text and outputs for the start of the actual response
+        self.response_text.clear();
+        self.outputs.clear();
 
         reasoning_trace
     }
