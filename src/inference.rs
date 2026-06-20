@@ -187,6 +187,38 @@ impl<'a> Inference<'a> {
         self.supplied_outputs = checkpoint.supplied_outputs;
     }
 
+    /// Reset the inference job, clearing the context and other internal states.
+    pub(crate) fn reset(&mut self) {
+        self.context.clear_kv_cache();
+        self.tokens.clear();
+        self.batch.clear();
+        self.queued_text.clear();
+        self.outputs.clear();
+        self.response_text.clear();
+    }
+
+    /// Truncate the context to a specific length. Should only be used when loading a checkpoint.
+    pub(crate) fn truncate(&mut self, length: usize) {
+        assert!(
+            length <= self.tokens.len(),
+            "Cannot truncate context to a length greater than the current token length"
+        );
+
+        // We need to properly handle queued text before decoding tokens into the context so...
+        // If we have queued text, push it to the context before generating.
+        if !self.queued_text.is_empty() {
+            self.unqueue_to_context(true);
+        }
+
+        self.tokens.truncate(length);
+        self.context
+            .clear_kv_cache_seq(Some(0), Some(length as u32), None)
+            .unwrap();
+        self.batch.clear();
+        self.outputs.clear();
+        self.response_text.clear();
+    }
+
     /// Moves the content of the queued text into the context, initializing logits for the last token if specified.
     pub(crate) fn unqueue_to_context(&mut self, is_last_before_infer: bool) {
         // Tokenize the text and get the length
@@ -472,37 +504,5 @@ impl<'a> Inference<'a> {
     /// Terminate the current response message by pushing the EOT token into the context.
     pub(crate) fn end_response(&mut self) {
         self.push_tokens(&[self.model().token_eot()]);
-    }
-
-    /// Reset the inference job, clearing the context and other internal states.
-    pub(crate) fn reset(&mut self) {
-        self.context.clear_kv_cache();
-        self.tokens.clear();
-        self.batch.clear();
-        self.queued_text.clear();
-        self.outputs.clear();
-        self.response_text.clear();
-    }
-
-    /// Truncate the context to a specific length. Should only be used when loading a checkpoint.
-    pub(crate) fn truncate(&mut self, length: usize) {
-        assert!(
-            length <= self.tokens.len(),
-            "Cannot truncate context to a length greater than the current token length"
-        );
-
-        // We need to properly handle queued text before decoding tokens into the context so...
-        // If we have queued text, push it to the context before generating.
-        if !self.queued_text.is_empty() {
-            self.unqueue_to_context(true);
-        }
-
-        self.tokens.truncate(length);
-        self.context
-            .clear_kv_cache_seq(Some(0), Some(length as u32), None)
-            .unwrap();
-        self.batch.clear();
-        self.outputs.clear();
-        self.response_text.clear();
     }
 }
