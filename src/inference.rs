@@ -72,7 +72,7 @@ impl ChatRole {
             ChatRole::System => "system",
             ChatRole::User => "user",
             ChatRole::Assistant => "assistant",
-            ChatRole::Tool => "tool",
+            ChatRole::Function => "function",
         }
     }
 }
@@ -180,7 +180,7 @@ impl<'a> Inference<'a> {
             && checkpoint.outputs == self.outputs
             && checkpoint.response_text == self.response_text
             && checkpoint.supplied_outputs == self.supplied_outputs
-            {
+        {
             return;
         }
 

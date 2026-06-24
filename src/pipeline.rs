@@ -26,12 +26,16 @@ impl<'a> Pipeline<'a> {
         mut input_fn: impl FnMut(PromptFormatter, &HashMap<String, String>) -> PromptFormatter + 'static,
         mut output_fn: impl FnMut(&mut Inference, &HashMap<String, String>) + 'static,
         example_pairs: &[(HashMap<String, String>, HashMap<String, String>)],
+        context_size: Option<usize>,
     ) -> Self {
         // Initialize the system prompt using the provided system function
         let system_prompt = (system_fn)(PromptFormatter::new());
 
         // Start the chat
         let mut chat = core.start_chat(system_prompt, creativity, None);
+        if let Some(size) = context_size {
+            chat = chat.with_context_size_limit(size);
+        }
 
         // Generate example messages from the example pairs
         for (inputs, outputs) in example_pairs {

@@ -1,4 +1,9 @@
-use std::{collections::HashMap, fmt::Display};
+use std::{
+    collections::HashMap,
+    fmt::{Debug, Display},
+};
+
+use serde_json::Map;
 
 use crate::{
     core::Core,
@@ -7,7 +12,7 @@ use crate::{
 };
 
 /// The chat compacts its own context if it exceeds this many tokens
-const DEFAULT_CONTEXT_SIZE_LIMIT: usize = 8192;
+pub const DEFAULT_CONTEXT_SIZE_LIMIT: usize = 8192;
 const MEMORY_HEADER: &str = "## Your Memory";
 
 /// A checkpoint storing the state of a `Chat`.
@@ -25,6 +30,7 @@ pub struct ChatCheckpoint {
 pub struct ChatResponse {
     pub content: String,
     pub reasoning: Option<String>,
+    pub function_call: Option<FunctionCall>,
     pub encountered_stop_sequence: Option<String>,
     pub inference_tokens_per_second: f32,
     pub prefill_tokens_per_second: f32,
@@ -36,7 +42,32 @@ pub enum ChatRole {
     System,
     User,
     Assistant,
-    Tool,
+    Function,
+}
+
+/// Represents a call to a function, usually emitted by the assistant in a chat.
+#[derive(Clone)]
+pub struct FunctionCall {
+    /// The name of the function being called.
+    pub name: String,
+    /// The arguments for the function call.
+    pub arguments: Map<String, serde_json::Value>,
+}
+
+impl Debug for FunctionCall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Format the function call as "function_name({arg1: value1, arg2: value2})"
+        write!(
+            f,
+            "{}({})",
+            self.name,
+            self.arguments
+                .iter()
+                .map(|(k, v)| format!("{}: {}", k, v))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
 }
 
 /// Represents a single message in a chat.
@@ -133,7 +164,6 @@ impl<'a> Chat<'a> {
 
     /// Begins inferring the next response based on the current chat context.
     /// The `Inference` object is passed to the provided function along with an optional reasoning trace if `use_reasoning` was `true`.
-    /// The function should return a tuple containing the result of the inference and the full content of the response (or an approximation, at least).
     pub fn infer_response_ext<R>(
         &mut self,
         use_reasoning: bool,
@@ -183,9 +213,45 @@ impl<'a> Chat<'a> {
             // Infer the response until one of the stop sequences is encountered
             let response = inference.infer(max_tokens, stop_sequences);
 
+            // Trim the response content
+            let mut content = response.content_without_stop_sequence().trim().to_string();
+
+            // Parse the function call from the response, if one is found
+            let mut function_call = None;
+            if let Some(parse_begin) = content.find("<function_call>")
+                && let Some(parse_end) = content.find("</function_call>")
+            {
+                // Get just the text between the tags
+                let function_call_str =
+                    &content[(parse_begin + "<function_call>".len())..parse_end];
+
+                // Parse the function call JSON
+                let function_call_json: Map<String, serde_json::Value> =
+                    serde_json::from_str(function_call_str).unwrap_or_default();
+
+                // Construct the FunctionCall struct from the parsed JSON
+                function_call = Some(FunctionCall {
+                    name: function_call_json
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    arguments: function_call_json
+                        .get("arguments")
+                        .and_then(|v| v.as_object())
+                        .cloned()
+                        .unwrap_or_default(),
+                });
+
+                // Remove the range from the content then trim again
+                content.replace_range(parse_begin..(parse_end + "</function_call>".len()), "");
+                content = content.trim().to_string();
+            }
+
             ChatResponse {
-                content: response.content_without_stop_sequence().trim().to_string(),
+                content,
                 reasoning,
+                function_call,
                 encountered_stop_sequence: response.encountered_stop_sequence,
                 inference_tokens_per_second: response.inference_tokens_per_second,
                 prefill_tokens_per_second: response.prefill_tokens_per_second,
@@ -259,7 +325,7 @@ impl<'a> Chat<'a> {
 
                 // Process the chat log through the summarizer
                 summarizer.process(&hmap! {
-                    "input" => chat_log
+                    "input".to_string() => chat_log.to_string()
                 })["output"]
                     .to_string()
             };

@@ -21,40 +21,6 @@ pub fn substitute_placeholders(input: &str, data: &HashMap<String, String>) -> S
     ac.replace_all(input, &replacements)
 }
 
-/// A trait representing a section of a prompt.
-pub trait PromptSection {
-    /// Returns the name of the prompt section.
-    fn name(&self) -> String;
-    /// Renders the content of the prompt section as a string, which is used to construct the final prompt.
-    /// Should also substitute "<|placeholder|>" placeholders with the corresponding value from the data map.
-    /// The `PromptFormatter` automatically places the section name as a header before the rendered content.
-    fn render(&self, data: &HashMap<String, String>) -> String;
-}
-
-/// A basic text prompt section that hold simple text.
-pub struct TextSection {
-    name: String,
-    content: String,
-}
-
-impl TextSection {
-    pub fn new(name: impl Display, content: impl Display) -> Self {
-        Self {
-            name: name.to_string(),
-            content: content.to_string(),
-        }
-    }
-}
-
-impl PromptSection for TextSection {
-    fn name(&self) -> String {
-        self.name.clone()
-    }
-    fn render(&self, data: &HashMap<String, String>) -> String {
-        substitute_placeholders(&self.content, data)
-    }
-}
-
 /// A numbered/bulleted list section.
 /// If `numbered` is true, the list will be numbered; otherwise, it will be bulleted.
 pub struct ListSection {
@@ -77,6 +43,7 @@ impl PromptSection for ListSection {
     fn name(&self) -> String {
         self.name.clone()
     }
+
     fn render(&self, data: &HashMap<String, String>) -> String {
         self.items
             .iter()
@@ -91,9 +58,85 @@ impl PromptSection for ListSection {
             .collect::<Vec<_>>()
             .join("\n")
     }
+
+    fn boxed_clone(&self) -> Box<dyn PromptSection> {
+        Box::new(Self {
+            name: self.name.clone(),
+            numbered: self.numbered,
+            items: self.items.clone(),
+        })
+    }
+}
+
+/*
+/// A section representing spacial informatiion.
+/// Contains information about the spatial layout or positioning of elements in the prompt.
+pub struct SpatialSection {
+    name: String,
+    node_positions: HashMap<String, Vector3<f32>>,
+    use_z_axis: bool,
+}
+
+impl SpatialSection {
+    /// Creates a new `SpatialSection` with the given name, node positions, and z-axis usage flag.
+    /// If `use_z_axis` is true, the z-coordinate of the positions will be considered; otherwise, only the x and y coordinates are used.
+    pub fn new(
+        name: impl Display,
+        node_positions: HashMap<String, Vector3<f32>>,
+        use_z_axis: bool,
+    ) -> Self {
+        Self {
+            name: name.to_string(),
+            node_positions,
+            use_z_axis,
+        }
+    }
+}*/
+
+/// A trait representing a section of a prompt.
+pub trait PromptSection {
+    /// Returns the name of the prompt section.
+    fn name(&self) -> String;
+    /// Renders the content of the prompt section as a string, which is used to construct the final prompt.
+    /// Should also substitute "<|placeholder|>" placeholders with the corresponding value from the data map.
+    /// The `PromptFormatter` automatically places the section name as a header before the rendered content.
+    fn render(&self, data: &HashMap<String, String>) -> String;
+    /// Returns a boxed clone of the prompt section.
+    fn boxed_clone(&self) -> Box<dyn PromptSection>;
+}
+
+/// A basic text prompt section that hold simple text.
+#[derive(Clone)]
+pub struct TextSection {
+    name: String,
+    content: String,
+}
+
+impl TextSection {
+    pub fn new(name: impl Display, content: impl Display) -> Self {
+        Self {
+            name: name.to_string(),
+            content: content.to_string(),
+        }
+    }
+}
+
+impl PromptSection for TextSection {
+    fn name(&self) -> String {
+        self.name.clone()
+    }
+
+    fn render(&self, data: &HashMap<String, String>) -> String {
+        substitute_placeholders(&self.content, data)
+    }
+
+    fn boxed_clone(&self) -> Box<dyn PromptSection> {
+        Box::new(self.clone())
+    }
 }
 
 /// A formatter that combines multiple prompt sections into a single prompt string.
+#[derive(Clone)]
 pub struct PromptFormatter {
     sections: Vec<Box<dyn PromptSection>>,
 }
@@ -175,5 +218,11 @@ impl PromptFormatter {
 impl Display for PromptFormatter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.format(&HashMap::new()))
+    }
+}
+
+impl Clone for Box<dyn PromptSection> {
+    fn clone(&self) -> Box<dyn PromptSection> {
+        self.boxed_clone()
     }
 }

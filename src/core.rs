@@ -136,6 +136,7 @@ impl Core {
             summarization_input,
             summarization_output,
             &[],
+            Some(99999999),
         )
     }
 
@@ -194,6 +195,7 @@ impl Core {
             json_builder_input,
             json_builder_output,
             &[],
+            None,
         )
     }
 
@@ -290,6 +292,7 @@ impl Core {
             multiple_choice_input,
             multiple_choice_output,
             &[],
+            None,
         )
     }
 }
