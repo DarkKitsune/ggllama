@@ -364,7 +364,7 @@ impl<'a> Agent<'a> {
         dlog!("System Prompt:\n{}", system_prompt);
 
         // Start the chat with the system prompt
-        let chat = Chat::new(core, system_prompt, 0.3, None);
+        let chat = Chat::new(core, system_prompt, 0.2, None);
 
         Self { chat, capabilities }
     }
