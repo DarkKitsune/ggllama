@@ -12,7 +12,7 @@ use crate::{
 };
 
 /// The chat compacts its own context if it exceeds this many tokens
-pub const DEFAULT_CONTEXT_SIZE_LIMIT: usize = 8192;
+pub const DEFAULT_CONTEXT_SIZE_LIMIT: usize = 16384;
 const MEMORY_HEADER: &str = "## Your Memory";
 
 /// A checkpoint storing the state of a `Chat`.
@@ -216,7 +216,7 @@ impl<'a> Chat<'a> {
             // Trim the response content
             let mut content = response.content_without_stop_sequence().trim().to_string();
 
-            // Parse the function call from the response, if one is found
+            // Parse the function calls from the response, until no more are found
             let mut function_call = None;
             if let Some(parse_begin) = content.find("<function_call>")
                 && let Some(parse_end) = content.find("</function_call>")
@@ -243,7 +243,7 @@ impl<'a> Chat<'a> {
                         .unwrap_or_default(),
                 });
 
-                // Remove the range from the content then trim again
+                // Remove the range from the content
                 content.replace_range(parse_begin..(parse_end + "</function_call>".len()), "");
                 content = content.trim().to_string();
             }
@@ -260,7 +260,7 @@ impl<'a> Chat<'a> {
     }
 
     /// Creates a checkpoint from the current state of the chat.
-    pub(crate) fn create_checkpoint(&self) -> ChatCheckpoint {
+    pub(crate) fn create_checkpoint(&mut self) -> ChatCheckpoint {
         ChatCheckpoint {
             inference_checkpoint: self.inference.create_checkpoint(),
             system_prompt: self.system_prompt.clone(),

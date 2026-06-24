@@ -16,15 +16,15 @@ use crate::{
 const BATCH_CAPACITY: usize = 4096;
 
 /// A single inference result.
-#[derive(Debug, Clone)]
-pub struct InferenceResult {
+pub struct InferenceResult<'a> {
     pub encountered_stop_sequence: Option<String>,
     pub content: String,
     pub inference_tokens_per_second: f32,
     pub prefill_tokens_per_second: f32,
+    pub potential_checkpoint: PotentialCheckpoint<'a>,
 }
 
-impl InferenceResult {
+impl<'a> InferenceResult<'a> {
     /// Get the content with the stop sequence ommitted, if a stop sequence was encountered.
     pub fn content_without_stop_sequence(&self) -> &str {
         if let Some(stop_sequence) = &self.encountered_stop_sequence {
@@ -44,6 +44,24 @@ pub struct InferenceCheckpoint {
     pub response_text: String,
     pub outputs: HashMap<String, String>,
     pub supplied_outputs: Option<HashMap<String, String>>,
+}
+
+/// Allows creating a checkpoint after new logits have been added to the context.
+pub struct PotentialCheckpoint<'a> {
+    pub(crate) inference: &'a Inference<'a>,
+}
+
+impl<'a> PotentialCheckpoint<'a> {
+    /// Create a checkpoint of the current state of the inference job.
+    pub fn create_checkpoint(&self) -> InferenceCheckpoint {
+        InferenceCheckpoint {
+            tokens: self.inference.tokens.clone(),
+            queued_text: self.inference.queued_text.clone(),
+            outputs: self.inference.outputs.clone(),
+            response_text: self.inference.response_text.clone(),
+            supplied_outputs: self.inference.supplied_outputs.clone(),
+        }
+    }
 }
 
 /// Represents an inference job that is currently running, handling the context automatically and providing an API for generating tokens.
@@ -91,14 +109,6 @@ impl<'a> Inference<'a> {
         creativity: f32,
         seed: Option<u32>,
     ) -> Self {
-        // Calculate the probability target based on creativity
-        // If creativity is very close zero then set target to -1.0 as this makes the adaptive_p sampler a no-op
-        let target = if creativity < 0.0001 {
-            -1.0
-        } else {
-            (1.0 - creativity * 0.67).clamp(0.33, 1.0)
-        };
-
         // If seed is not provided, use the current time as a seed
         let seed = seed.unwrap_or_else(|| {
             SystemTime::now()
@@ -107,10 +117,24 @@ impl<'a> Inference<'a> {
                 .as_secs() as u32
         });
 
+        // Curve creativity so that small values are amplified slightly.
+        let creativity = creativity.clamp(0.0, 1.0).sqrt();
+
+        // Calculate a safe minimum probability based on creativity
+        let min_probability = 0.5 - creativity * 0.5;
+
+        // Calculate a probability target based on creativity
+        // If creativity is very close zero then set target to -1.0 as this makes the adaptive_p sampler a no-op
+        let target_probability = if creativity < 0.0001 {
+            -1.0
+        } else {
+            1.0 - creativity * 0.67
+        };
+
         // Create adaptive sampler which only samples tokens that aren't very unlikely
         let sampler = LlamaSampler::chain_simple([
-            LlamaSampler::min_p(0.05, 1),
-            LlamaSampler::adaptive_p(target, 0.9, seed),
+            LlamaSampler::min_p(min_probability, 1),
+            LlamaSampler::adaptive_p(target_probability, 0.9, seed),
         ]);
 
         // Create batch for decoding tokens into the context
@@ -160,8 +184,11 @@ impl<'a> Inference<'a> {
         self.supplied_outputs = map;
     }
 
-    /// Create a checkpoint of the current state of the inference job, which can be used to restore the context to this state later.
-    pub fn create_checkpoint(&self) -> InferenceCheckpoint {
+    /// Create a checkpoint which can be restored to later.
+    pub fn create_checkpoint(&mut self) -> InferenceCheckpoint {
+        // Force unqueue into the context to ensure new logits
+        self.unqueue_to_context(true);
+
         InferenceCheckpoint {
             tokens: self.tokens.clone(),
             queued_text: self.queued_text.clone(),
@@ -240,6 +267,10 @@ impl<'a> Inference<'a> {
 
     /// Moves the content of the queued text into the context, initializing logits for the last token if specified.
     pub(crate) fn unqueue_to_context(&mut self, is_last_before_infer: bool) {
+        if self.queued_text.is_empty() {
+            return;
+        }
+
         // Tokenize the text and get the length
         let tokens = self
             .model()
@@ -278,7 +309,7 @@ impl<'a> Inference<'a> {
     }
 
     /// Push tokens into the context. This should not be used during a message response unless you know what you are doing.
-    pub(crate) fn push_tokens(&mut self, tokens: &[LlamaToken]) {
+    pub(crate) fn push_tokens(&mut self, tokens: &[LlamaToken]) -> PotentialCheckpoint<'_> {
         // We need to properly handle queued text before decoding tokens into the context so...
         // If we have queued text, push it to the context before generating.
         if !self.queued_text.is_empty() {
@@ -297,6 +328,9 @@ impl<'a> Inference<'a> {
             }
             self.context.decode(&mut self.batch).unwrap();
         }
+
+        // Return a potential checkpoint that can be used to create a checkpoint here
+        PotentialCheckpoint { inference: self }
     }
 
     /// Queue messages to be added to the context, then begin the assistant response to said messages.
@@ -456,6 +490,7 @@ impl<'a> Inference<'a> {
             prefill_tokens_per_second,
             inference_tokens_per_second,
             encountered_stop_sequence,
+            potential_checkpoint: PotentialCheckpoint { inference: self },
         }
     }
 
@@ -487,12 +522,10 @@ impl<'a> Inference<'a> {
 
         // If no supplied value is found, perform inference.
         let result = self.infer(None, stop_sequences);
+        let result = result.content_without_stop_sequence().trim().to_string();
 
         // Insert the inferred result into the outputs map.
-        self.outputs.insert(
-            name.clone(),
-            result.content_without_stop_sequence().trim().to_string(),
-        );
+        self.outputs.insert(name.clone(), result);
 
         // Return a mutable reference to the value in the outputs map.
         self.outputs.get_mut(&name).unwrap()

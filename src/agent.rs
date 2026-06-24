@@ -364,7 +364,7 @@ impl<'a> Agent<'a> {
         dlog!("System Prompt:\n{}", system_prompt);
 
         // Start the chat with the system prompt
-        let chat = Chat::new(core, system_prompt, 0.5, None);
+        let chat = Chat::new(core, system_prompt, 0.3, None);
 
         Self { chat, capabilities }
     }
@@ -373,6 +373,7 @@ impl<'a> Agent<'a> {
     pub fn run(
         &mut self,
         environment: &mut impl Environment,
+        use_reasoning: bool,
         task: impl AsRef<str>,
     ) -> serde_json::Value {
         // Create the user prompt with the task and available functions
@@ -391,8 +392,8 @@ impl<'a> Agent<'a> {
             .with_section(TextSection::new(
                 "Functions",
                 format!(
-                    "When you need to call a function to complete the task, you should *only* respond with the function name and the arguments in JSON format, \
-                    between <function_call> and </function_call> tags. For example:\n\
+                    "You may call *one* function per response. If you need to call a function to complete the task, you should *only* respond with the function name and the arguments in JSON format, \
+                    between <function_call> and </function_call> tags. All parameters should be provided as matching arguments. For example:\n\
                     ```\n\
 <function_call>
 {{
@@ -404,9 +405,10 @@ impl<'a> Agent<'a> {
 }}
 </function_call>\n\
                     ```\n\
-                    You may call any of the following functions:\n<functions>\n```json\n{}\n</functions>\n\
-                    Once you have completed the task, you should call the \"exit\" function with the result of the task if there is a meaningful result, \
-                    otherwise call \"exit\" with a summary of steps that led to the task's completion or failure.",
+                    The function call *must* be formatted as shown above, and must include both <function_call> and </function_call> tags.
+                    You may call any of the following functions:\n<functions>\n```json\n{}\n```\n</functions>\n\
+                    Once you have completed the task, you should call the \"exit\" function with a very short and concise summary of what you did to complete \
+                    the task, including every function call.",
                     environment.get_allowed_functions(&self.capabilities)
                         .iter()
                         .map(|f| serde_json::to_string_pretty(&f.to_json()).unwrap())
@@ -426,16 +428,28 @@ impl<'a> Agent<'a> {
             let checkpoint = self.chat.create_checkpoint();
 
             // Infer the next response from the agent
-            let response = self.chat.infer_response(None, &[], None, true);
+            let response = self.chat.infer_response(None, &[], None, use_reasoning);
 
             // Log the agent's response for debugging purposes
-            dlog!("Function call:\n{:#?}", response.function_call);
+            if let Some(function_call) = response.function_call.as_ref() {
+                dlog!("Function call:\n{:#?}", function_call);
+            }
+            else {
+                dlog!("Response:\n{:#?}", response);
+            }
 
             // If there was a function call then execute it
             if let Some(function_call) = response.function_call {
                 // If this was a call to "exit" then break the loop with the result
                 if function_call.name == "exit" {
-                    break Some(function_call.arguments["result"].clone());
+                    // If there is only a "result" argument then return it, otherwise return all arguments
+                    break if function_call.arguments.len() == 1
+                        && function_call.arguments.contains_key("result")
+                    {
+                        Some(function_call.arguments["result"].clone())
+                    } else {
+                        Some(serde_json::to_value(&function_call.arguments).unwrap())
+                    };
                 }
 
                 // Execute the function call in the environment and get the result

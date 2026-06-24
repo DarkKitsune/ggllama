@@ -1,65 +1,103 @@
 use ggllama::{
     agent::{
-        Agent, BasicEnvironment, Capability, Function, FunctionParameter, FunctionResult,
+        Agent, BasicEnvironment, Function, FunctionParameter, FunctionResult,
         ParameterType,
     },
     core::{CompressionLevel, Core},
-    map,
+    dlog, map,
 };
 
 fn main() {
     // Initialize the core with the model and some KV cache quantization/compression
     let core = Core::from_model(
-        "models/Qwen3.5-4B-ARA-heresy-v2.i1-Q5_K_M.gguf",
+        "models/Qwythos-9B-Claude-Mythos-5-1M-Q5_K_M.gguf",
         CompressionLevel::Medium,
     );
 
-    // Create an environment for manipulating a string
-    let string = String::from(
-        "There was nothing so very remarkable in that; nor did Alice think it so very much out of the way to hear the Rabbit say to itself, \
-        `Oh dear! Oh dear! I shall be late!' (when she thought it over afterwards, it occurred to her that she ought to have wondered at this, \
-        but at the time it all seemed quite natural); but when the Rabbit actually took a watch out of its waistcoat-pocket, and looked at it, \
-        and then hurried on, Alice started to her feet, for it flashed across her mind that she had never before seen a rabbit with either a waistcoat-pocket, \
-        or a watch to take out of it, and burning with curiosity, she ran across the field after it, \
-        and fortunately was just in time to see it pop down a large rabbit-hole under the hedge.",
-    );
-    let mut environment: BasicEnvironment<String> = BasicEnvironment::new(
-        string,
-        "The environment consists of a single string.",
+    // The data which the agent will work with
+    struct DinnerSplit {
+        total_bill: f64,
+        tip_percentage: f64,
+        people_names: Vec<String>,
+        split_per_person: Option<f64>,
+    }
+
+    // Create the environment which allows the agent to manipulate the data
+    let mut environment: BasicEnvironment<_> = BasicEnvironment::new(
+        DinnerSplit {
+            total_bill: 100.0,
+            tip_percentage: 15.0,
+            people_names: vec!["Alice".to_string(), "Bob".to_string(), "Charlie".to_string()],
+            split_per_person: None,
+        },
+        "A group of people have just finished eating dinner and need to split the bill.",
         vec![
-            Function::new(
-                "get_string",
-                "Returns the current string.",
+            Function::<BasicEnvironment<DinnerSplit>>::new(
+                "get_people",
+                "Gets the list of people involved in the dinner.",
                 vec![],
                 vec![],
-                |env: &mut BasicEnvironment<String>, _| {
-                    FunctionResult::ok_with(map! {
-                        "string" => env.data().clone(),
+                |env: &mut BasicEnvironment<_>, _args| {
+                    FunctionResult::Ok(map! {
+                        "people_names" => env.data().people_names.clone()
                     })
-                },
+                }
             ),
-            Function::new(
-                "set_string",
-                "Sets the current string.",
-                vec![FunctionParameter::new("string", ParameterType::String)],
-                vec![Capability::FileWrite],
-                |env: &mut BasicEnvironment<String>, args| {
-                    let new_string = args["string"].as_str().unwrap();
-                    (*env.data_mut()) = new_string.to_string();
-                    FunctionResult::ok()
-                },
+            Function::<BasicEnvironment<DinnerSplit>>::new(
+                "get_price",
+                "Gets the total bill amount before tips, and the tip percentage.",
+                vec![],
+                vec![],
+                |env: &mut BasicEnvironment<_>, _args| {
+                    FunctionResult::Ok(map! {
+                        "total_bill" => env.data().total_bill,
+                        "tip_percentage" => env.data().tip_percentage
+                    })
+                }
             ),
-        ],
+            Function::<BasicEnvironment<DinnerSplit>>::new(
+                "set_split",
+                "Sets the split per person for the dinner.",
+                vec![
+                    FunctionParameter {
+                        name: "split_per_person".to_string(),
+                        param_type: ParameterType::Number,
+                    }
+                ],
+                vec![],
+                |env: &mut BasicEnvironment<_>, args| {
+                    if let Some(split) = args.get("split_per_person").and_then(|v| v.as_f64()) {
+                        env.data_mut().split_per_person = Some(split);
+                        FunctionResult::Ok(map! {
+                            "split_per_person" => split
+                        })
+                    } else {
+                        FunctionResult::Err("Invalid split_per_person value".to_string())
+                    }
+                }
+            ),
+        ]
     );
 
     // Create the agent
     let mut agent = Agent::new(&core, vec![]);
 
-    // Give the agent a string modifying task and run it
+    // Start timing
+    let time_start = std::time::Instant::now();
+
+    // Give the agent a task and run it
     let result = agent.run(
         &mut environment,
-        "Rewrite the string to be more concise and clear, while preserving the original meaning.",
+        true,
+        "Please calculate the split per person for the dinner.",
     );
 
-    println!("Task result: {}", result);
+    // End timing
+    let time_end = std::time::Instant::now();
+    let duration = time_end - time_start;
+
+    // Logging
+    dlog!("Task Result: {}", result);
+    dlog!("Split per person: {:?}", environment.data().split_per_person);
+    dlog!("Time To Complete Task: {:?}", duration);
 }
