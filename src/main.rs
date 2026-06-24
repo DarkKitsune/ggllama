@@ -1,8 +1,5 @@
 use ggllama::{
-    agent::{
-        Agent, BasicEnvironment, Function, FunctionParameter, FunctionResult,
-        ParameterType,
-    },
+    agent::{Agent, BasicEnvironment, Function, FunctionParameter, FunctionResult, ParameterType},
     core::{CompressionLevel, Core},
     dlog, map,
 };
@@ -27,7 +24,11 @@ fn main() {
         DinnerSplit {
             total_bill: 100.0,
             tip_percentage: 15.0,
-            people_names: vec!["Alice".to_string(), "Bob".to_string(), "Charlie".to_string()],
+            people_names: vec![
+                "Alice".to_string(),
+                "Bob".to_string(),
+                "Charlie".to_string(),
+            ],
             split_per_person: None,
         },
         "A group of people have just finished eating dinner and need to split the bill.",
@@ -41,7 +42,7 @@ fn main() {
                     FunctionResult::Ok(map! {
                         "people_names" => env.data().people_names.clone()
                     })
-                }
+                },
             ),
             Function::<BasicEnvironment<DinnerSplit>>::new(
                 "get_price",
@@ -53,17 +54,15 @@ fn main() {
                         "total_bill" => env.data().total_bill,
                         "tip_percentage" => env.data().tip_percentage
                     })
-                }
+                },
             ),
             Function::<BasicEnvironment<DinnerSplit>>::new(
                 "set_split",
                 "Sets the split per person for the dinner.",
-                vec![
-                    FunctionParameter {
-                        name: "split_per_person".to_string(),
-                        param_type: ParameterType::Number,
-                    }
-                ],
+                vec![FunctionParameter {
+                    name: "split_per_person".to_string(),
+                    param_type: ParameterType::Number,
+                }],
                 vec![],
                 |env: &mut BasicEnvironment<_>, args| {
                     if let Some(split) = args.get("split_per_person").and_then(|v| v.as_f64()) {
@@ -74,9 +73,9 @@ fn main() {
                     } else {
                         FunctionResult::Err("Invalid split_per_person value".to_string())
                     }
-                }
+                },
             ),
-        ]
+        ],
     );
 
     // Create the agent
@@ -98,6 +97,9 @@ fn main() {
 
     // Logging
     dlog!("Task Result: {}", result);
-    dlog!("Split per person: {:?}", environment.data().split_per_person);
+    dlog!(
+        "Split per person: {:?}",
+        environment.data().split_per_person
+    );
     dlog!("Time To Complete Task: {:?}", duration);
 }

@@ -405,7 +405,7 @@ impl<'a> Agent<'a> {
 }}
 </function_call>\n\
                     ```\n\
-                    The function call *must* be formatted as shown above, and must include both <function_call> and </function_call> tags.
+                    The function call *must* be formatted as shown above, and must include both <function_call> and </function_call> tags. \
                     You may call any of the following functions:\n<functions>\n```json\n{}\n```\n</functions>\n\
                     Once you have completed the task, you should call the \"exit\" function with a very short and concise summary of what you did to complete \
                     the task, including every function call.",
@@ -433,8 +433,7 @@ impl<'a> Agent<'a> {
             // Log the agent's response for debugging purposes
             if let Some(function_call) = response.function_call.as_ref() {
                 dlog!("Function call:\n{:#?}", function_call);
-            }
-            else {
+            } else {
                 dlog!("Response:\n{:#?}", response);
             }
 
