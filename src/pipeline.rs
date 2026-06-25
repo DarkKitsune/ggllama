@@ -1,17 +1,16 @@
-use std::collections::HashMap;
-
 use crate::{
     chat::{Chat, ChatCheckpoint, ChatRole},
     core::Core,
     inference::Inference,
     prompt_formatter::PromptFormatter,
+    util::JsonMap,
 };
 
 /// A pipeline defines a set of inputs and outputs and the processing logic that transforms the inputs into the outputs.
 pub struct Pipeline<'a> {
     chat: Chat<'a>,
-    input_fn: Box<dyn FnMut(PromptFormatter, &HashMap<String, String>) -> PromptFormatter>,
-    output_fn: Box<dyn FnMut(&mut Inference, &HashMap<String, String>)>,
+    input_fn: Box<dyn FnMut(PromptFormatter, &JsonMap) -> PromptFormatter>,
+    output_fn: Box<dyn FnMut(&mut Inference, &JsonMap)>,
     restore_checkpoint: Option<ChatCheckpoint>,
     has_run: bool,
 }
@@ -23,9 +22,9 @@ impl<'a> Pipeline<'a> {
         creativity: f32,
         use_persistent_memory: bool,
         mut system_fn: impl FnMut(PromptFormatter) -> PromptFormatter + 'static,
-        mut input_fn: impl FnMut(PromptFormatter, &HashMap<String, String>) -> PromptFormatter + 'static,
-        mut output_fn: impl FnMut(&mut Inference, &HashMap<String, String>) + 'static,
-        example_pairs: &[(HashMap<String, String>, HashMap<String, String>)],
+        mut input_fn: impl FnMut(PromptFormatter, &JsonMap) -> PromptFormatter + 'static,
+        mut output_fn: impl FnMut(&mut Inference, &JsonMap) + 'static,
+        example_pairs: &[(JsonMap, JsonMap)],
         context_size: Option<usize>,
     ) -> Self {
         // Initialize the system prompt using the provided system function
@@ -72,7 +71,7 @@ impl<'a> Pipeline<'a> {
     }
 
     /// Process the inputs through the pipeline, updating the internal chat context and returning the outputs.
-    pub fn process(&mut self, inputs: &HashMap<String, String>) -> HashMap<String, String> {
+    pub fn run(&mut self, inputs: &JsonMap) -> JsonMap {
         // If this is not the first run and persistent memory is disabled, restore the chat to the saved checkpoint to avoid retaining memory of old operations.
         if self.has_run
             && let Some(restore_checkpoint) = &self.restore_checkpoint

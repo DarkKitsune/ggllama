@@ -5,4 +5,5 @@ pub mod inference;
 pub mod json;
 pub mod pipeline;
 pub mod prompt_formatter;
+pub mod scene;
 pub mod util;

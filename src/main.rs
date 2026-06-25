@@ -1,105 +1,45 @@
 use ggllama::{
-    agent::{Agent, BasicEnvironment, Function, FunctionParameter, FunctionResult, ParameterType},
     core::{CompressionLevel, Core},
-    dlog, map,
+    dlog, hmap,
+    scene::{CharacterData, Scene},
 };
 
 fn main() {
     // Initialize the core with the model and some KV cache quantization/compression
     let core = Core::from_model(
-        "models/Qwythos-9B-Claude-Mythos-5-1M-Q5_K_M.gguf",
+        "models/Qwen3.5-4B-ARA-heresy-v2.i1-Q5_K_M.gguf",
         CompressionLevel::Medium,
     );
 
-    // The data which the agent will work with
-    struct DinnerSplit {
-        total_bill: f64,
-        tip_percentage: f64,
-        people_names: Vec<String>,
-        split_per_person: Option<f64>,
+    // Create a new scene with an opening narration
+    let mut scene = Scene::new(
+        "Opening Scene",
+        "The story begins in a small village.",
+        hmap! {
+            "Mina".to_string() => CharacterData::new(
+                "The protagonist of the story, and main character of the adventure. She is curious and excitable, and she wields a magical staff.",
+                true,
+            ),
+            "Bruno".to_string() => CharacterData::new(
+                "A supporting character in the story, and friend of Mina. He is loyal and brave and wields a sword.",
+                true,
+            ),
+            "Jax".to_string() => CharacterData::new(
+                "A supporting character in the story, and friend of Mina. He is clever and resourceful and wields a bow. He is also an expert in knowledge.",
+                true,
+            ),
+        },
+        "It is a quiet morning in the village. Mina is walking through the streets with Bruno and Jax.",
+    );
+
+    // Create a scene writer pipeline
+    let mut pipeline = core.new_scene_writer();
+
+    // Infer several turns
+    for _ in 0..7 {
+        scene.infer_next_turn(&mut pipeline);
     }
 
-    // Create the environment which allows the agent to manipulate the data
-    let mut environment: BasicEnvironment<_> = BasicEnvironment::new(
-        DinnerSplit {
-            total_bill: 100.0,
-            tip_percentage: 15.0,
-            people_names: vec![
-                "Alice".to_string(),
-                "Bob".to_string(),
-                "Charlie".to_string(),
-            ],
-            split_per_person: None,
-        },
-        "A group of people have just finished eating dinner and need to split the bill.",
-        vec![
-            Function::<BasicEnvironment<DinnerSplit>>::new(
-                "get_people",
-                "Gets the list of people involved in the dinner.",
-                vec![],
-                vec![],
-                |env: &mut BasicEnvironment<_>, _args| {
-                    FunctionResult::Ok(map! {
-                        "people_names" => env.data().people_names.clone()
-                    })
-                },
-            ),
-            Function::<BasicEnvironment<DinnerSplit>>::new(
-                "get_price",
-                "Gets the total bill amount before tips, and the tip percentage.",
-                vec![],
-                vec![],
-                |env: &mut BasicEnvironment<_>, _args| {
-                    FunctionResult::Ok(map! {
-                        "total_bill" => env.data().total_bill,
-                        "tip_percentage" => env.data().tip_percentage
-                    })
-                },
-            ),
-            Function::<BasicEnvironment<DinnerSplit>>::new(
-                "set_split",
-                "Sets the split per person for the dinner.",
-                vec![FunctionParameter {
-                    name: "split_per_person".to_string(),
-                    param_type: ParameterType::Number,
-                }],
-                vec![],
-                |env: &mut BasicEnvironment<_>, args| {
-                    if let Some(split) = args.get("split_per_person").and_then(|v| v.as_f64()) {
-                        env.data_mut().split_per_person = Some(split);
-                        FunctionResult::Ok(map! {
-                            "split_per_person" => split
-                        })
-                    } else {
-                        FunctionResult::Err("Invalid split_per_person value".to_string())
-                    }
-                },
-            ),
-        ],
-    );
-
-    // Create the agent
-    let mut agent = Agent::new(&core, vec![]);
-
-    // Start timing
-    let time_start = std::time::Instant::now();
-
-    // Give the agent a task and run it
-    let result = agent.run(
-        &mut environment,
-        true,
-        "Please calculate the split per person for the dinner.",
-    );
-
-    // End timing
-    let time_end = std::time::Instant::now();
-    let duration = time_end - time_start;
-
-    // Logging
-    dlog!("Task Result: {}", result);
-    dlog!(
-        "Split per person: {:?}",
-        environment.data().split_per_person
-    );
-    dlog!("Time To Complete Task: {:?}", duration);
+    // Print the final state of the scene
+    dlog!(!"Final scene:\n{}", scene);
 }

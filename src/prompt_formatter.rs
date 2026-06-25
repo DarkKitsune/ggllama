@@ -1,17 +1,24 @@
-use std::{collections::HashMap, fmt::Display};
+use std::fmt::Display;
 
 use aho_corasick::AhoCorasick;
 
+use crate::{map, util::JsonMap};
+
 /// Helper function for parsing placeholders in the format "<|placeholder|>" and substituting
 /// them with their corresponding values from the data map.
-pub fn substitute_placeholders(input: &str, data: &HashMap<String, String>) -> String {
+pub fn substitute_placeholders(input: &str, data: &JsonMap) -> String {
     // Build the patterns and replacements for the Aho-Corasick algorithm
     let (patterns, replacements): (Vec<String>, Vec<String>) = data
         .iter()
         .flat_map(|(k, v)| {
+            let v_string = if v.is_string() {
+                v.as_str().unwrap().to_string()
+            } else {
+                v.to_string()
+            };
             [
-                (format!("<|{}|>", k), v.clone()),
-                (format!("<| {} |>", k), v.clone()),
+                (format!("<|{}|>", k), v_string.clone()),
+                (format!("<| {} |>", k), v_string),
             ]
         })
         .unzip();
@@ -44,7 +51,7 @@ impl PromptSection for ListSection {
         self.name.clone()
     }
 
-    fn render(&self, data: &HashMap<String, String>) -> String {
+    fn render(&self, data: &JsonMap) -> String {
         self.items
             .iter()
             .enumerate()
@@ -100,7 +107,7 @@ pub trait PromptSection {
     /// Renders the content of the prompt section as a string, which is used to construct the final prompt.
     /// Should also substitute "<|placeholder|>" placeholders with the corresponding value from the data map.
     /// The `PromptFormatter` automatically places the section name as a header before the rendered content.
-    fn render(&self, data: &HashMap<String, String>) -> String;
+    fn render(&self, data: &JsonMap) -> String;
     /// Returns a boxed clone of the prompt section.
     fn boxed_clone(&self) -> Box<dyn PromptSection>;
 }
@@ -126,7 +133,7 @@ impl PromptSection for TextSection {
         self.name.clone()
     }
 
-    fn render(&self, data: &HashMap<String, String>) -> String {
+    fn render(&self, data: &JsonMap) -> String {
         substitute_placeholders(&self.content, data)
     }
 
@@ -155,7 +162,7 @@ impl PromptFormatter {
     }
 
     /// Formats a prompt by combining all sections and substituting "<|placeholder|>" placeholders with the given data.
-    pub fn format(&self, data: &HashMap<String, String>) -> String {
+    pub fn format(&self, data: &JsonMap) -> String {
         self.sections
             .iter()
             .map(|s| format!("## {}\n{}", s.name(), s.render(data)))
@@ -217,7 +224,7 @@ impl PromptFormatter {
 
 impl Display for PromptFormatter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.format(&HashMap::new()))
+        write!(f, "{}", self.format(&map! {}))
     }
 }
 

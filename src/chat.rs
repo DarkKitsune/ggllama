@@ -1,14 +1,12 @@
-use std::{
-    collections::HashMap,
-    fmt::{Debug, Display},
-};
+use std::fmt::{Debug, Display};
 
 use serde_json::Map;
 
 use crate::{
     core::Core,
-    hmap,
     inference::{Inference, InferenceCheckpoint},
+    map,
+    util::JsonMap,
 };
 
 /// The chat compacts its own context if it exceeds this many tokens
@@ -283,7 +281,7 @@ impl<'a> Chat<'a> {
     /// Supplies the outputs for the response.
     /// When using `Inference::infer_output`, if a value is found in this map under the given name, it will be used instead of inferring.
     /// This is useful for things like example generation.
-    pub fn supply_outputs_for_response(&mut self, map: Option<HashMap<String, String>>) {
+    pub fn supply_outputs_for_response(&mut self, map: Option<JsonMap>) {
         self.inference.supply_outputs_for_response(map);
     }
 
@@ -324,9 +322,11 @@ impl<'a> Chat<'a> {
                 let mut summarizer = self.inference.core().new_summarizer();
 
                 // Process the chat log through the summarizer
-                summarizer.process(&hmap! {
-                    "input".to_string() => chat_log.to_string()
+                summarizer.run(&map! {
+                    "input" => chat_log
                 })["output"]
+                    .as_str()
+                    .unwrap()
                     .to_string()
             };
 

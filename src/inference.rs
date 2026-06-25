@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt::Display, time::SystemTime};
+use std::{fmt::Display, time::SystemTime};
 
 use llama_cpp_4::{
     context::LlamaContext,
@@ -7,13 +7,46 @@ use llama_cpp_4::{
     sampling::LlamaSampler,
     token::LlamaToken,
 };
+use serde_json::Value;
 
 use crate::{
     chat::{ChatMessage, ChatRole},
     core::Core,
+    util::JsonMap,
 };
 
 const BATCH_CAPACITY: usize = 4096;
+const CREATIVITY_NUDGE_DOWN_EVERY_N: usize = 512; // Every N tokens, we nudge the creativity down towards 0.0 for stability over long contexts.
+/// Higher = creativity adapts downwards slower.
+const CREATIVITY_DOWN_DIVISOR: f32 = 4.5;
+/// Higher = creativity adapts upwards slower.
+const CREATIVITY_UP_DIVISOR: f32 = 3.0;
+/// When restoring a checkpoint, creativity is temporarily raised then reduced again after this many tokens.
+/// This is to encourage creativity and avoid the model getting stuck in a loop of repeating the same output after restoring a checkpoint.
+const CHECKPOINT_RESTORE_CREATIVITY_GRACE: usize = 3;
+
+/// Helper function to create a new sampler.
+fn new_sampler(creativity: f32, seed: u32) -> LlamaSampler {
+    // Clamp creativity
+    let creativity = creativity.clamp(0.0, 1.0);
+
+    // Calculate a safe minimum probability based on creativity
+    let min_probability = 0.5 - creativity.sqrt() * 0.5;
+
+    // Calculate a probability target based on creativity
+    // If creativity is very close zero then set target to -1.0 as this makes the adaptive_p sampler a no-op
+    let target_probability = if creativity < 0.0001 {
+        -1.0
+    } else {
+        1.0 - creativity * 0.6
+    };
+
+    // Create adaptive sampler which only samples tokens that aren't very unlikely
+    LlamaSampler::chain_simple([
+        LlamaSampler::min_p(min_probability, 1),
+        LlamaSampler::adaptive_p(target_probability, 0.9, seed),
+    ])
+}
 
 /// A single inference result.
 pub struct InferenceResult<'a> {
@@ -42,8 +75,9 @@ pub struct InferenceCheckpoint {
     pub tokens: Vec<LlamaToken>,
     pub queued_text: String,
     pub response_text: String,
-    pub outputs: HashMap<String, String>,
-    pub supplied_outputs: Option<HashMap<String, String>>,
+    pub outputs: JsonMap,
+    pub supplied_outputs: Option<JsonMap>,
+    pub creativity: f32,
 }
 
 /// Allows creating a checkpoint after new logits have been added to the context.
@@ -60,6 +94,7 @@ impl<'a> PotentialCheckpoint<'a> {
             outputs: self.inference.outputs.clone(),
             response_text: self.inference.response_text.clone(),
             supplied_outputs: self.inference.supplied_outputs.clone(),
+            creativity: self.inference.creativity,
         }
     }
 }
@@ -74,10 +109,17 @@ pub struct Inference<'a> {
     /// We also keep a copy of all text for a response as it is generated.
     response_text: String,
     /// We also store named inference results as outputs.
-    outputs: HashMap<String, String>,
+    outputs: JsonMap,
     /// Supplied outputs that should be used instead of inferring.
-    supplied_outputs: Option<HashMap<String, String>>,
+    supplied_outputs: Option<JsonMap>,
     sampler: LlamaSampler,
+    /// Keep track of the seed so we can increment it and recreate the sampler when restoring checkpoint, to get new results.
+    seed: u32,
+    /// Keep track of the creativity value so we can nudge it towards 0.0 every so often for stability,
+    /// and so we can also nudge it towards 1.0 when restoring a checkpoint, to get new results.
+    creativity: f32,
+    /// Keep track of how many tokens since we last nudged down the creativity, so we can nudge it down every N tokens for stability.
+    tokens_since_last_creativity_nudge: usize,
     batch: LlamaBatch,
     /// We queue text that must be added to the context until the next generation call, at which point we add it and then clear the queue.
     /// This allows us to properly initialize logits before generating.
@@ -117,25 +159,8 @@ impl<'a> Inference<'a> {
                 .as_secs() as u32
         });
 
-        // Curve creativity so that small values are amplified slightly.
-        let creativity = creativity.clamp(0.0, 1.0).sqrt();
-
-        // Calculate a safe minimum probability based on creativity
-        let min_probability = 0.5 - creativity * 0.5;
-
-        // Calculate a probability target based on creativity
-        // If creativity is very close zero then set target to -1.0 as this makes the adaptive_p sampler a no-op
-        let target_probability = if creativity < 0.0001 {
-            -1.0
-        } else {
-            1.0 - creativity * 0.5
-        };
-
-        // Create adaptive sampler which only samples tokens that aren't very unlikely
-        let sampler = LlamaSampler::chain_simple([
-            LlamaSampler::min_p(min_probability, 1),
-            LlamaSampler::adaptive_p(target_probability, 0.9, seed),
-        ]);
+        // Create a new sampler with the given creativity and seed
+        let sampler = new_sampler(creativity, seed);
 
         // Create batch for decoding tokens into the context
         let batch = LlamaBatch::new(BATCH_CAPACITY, 1);
@@ -145,11 +170,14 @@ impl<'a> Inference<'a> {
             context,
             tokens,
             sampler,
+            seed,
+            creativity,
             batch,
             response_text: String::new(),
-            outputs: HashMap::new(),
+            outputs: JsonMap::new(),
             supplied_outputs: None,
             queued_text: String::new(),
+            tokens_since_last_creativity_nudge: 0,
         }
     }
 
@@ -174,20 +202,20 @@ impl<'a> Inference<'a> {
     }
 
     /// Get the outputs associated with the current/last response.
-    pub fn outputs(&self) -> &HashMap<String, String> {
+    pub fn outputs(&self) -> &JsonMap {
         &self.outputs
     }
 
     /// When using infer_output, if a value is found in this map under the given name, it will be used instead of inferring.
     /// This is useful for things like example generation.
-    pub fn supply_outputs_for_response(&mut self, map: Option<HashMap<String, String>>) {
+    pub fn supply_outputs_for_response(&mut self, map: Option<JsonMap>) {
         self.supplied_outputs = map;
     }
 
     /// Create a checkpoint which can be restored to later.
     pub fn create_checkpoint(&mut self) -> InferenceCheckpoint {
         // Force unqueue into the context to ensure new logits
-        self.unqueue_to_context(true);
+        //self.unqueue_to_context(true); // Part of old behavior
 
         InferenceCheckpoint {
             tokens: self.tokens.clone(),
@@ -195,11 +223,13 @@ impl<'a> Inference<'a> {
             outputs: self.outputs.clone(),
             response_text: self.response_text.clone(),
             supplied_outputs: self.supplied_outputs.clone(),
+            creativity: self.creativity,
         }
     }
 
     /// Restore the context to a previously created checkpoint.
     pub fn restore_checkpoint(&mut self, checkpoint: InferenceCheckpoint) {
+        /* OLD BEHAVIOR UNSUPPORTED BY SOME MODELS, instead now we just reset and refill the context
         // If the requested length is equal to the current token length, and the rest of the checkpoint matches, exit early.
         // This makes it a no-op at the beginning of a checkpoint-validate-restore loop if it comes before any inference.
         if checkpoint.tokens.len() == self.tokens.len()
@@ -223,6 +253,40 @@ impl<'a> Inference<'a> {
         self.outputs = checkpoint.outputs;
         self.response_text = checkpoint.response_text;
         self.supplied_outputs = checkpoint.supplied_outputs;
+        */
+
+        // Exit early if things already match
+        if checkpoint.tokens == self.tokens
+            && checkpoint.queued_text == self.queued_text
+            && checkpoint.outputs == self.outputs
+            && checkpoint.response_text == self.response_text
+            && checkpoint.supplied_outputs == self.supplied_outputs
+        {
+            return;
+        }
+
+        // Reset the inference job, clearing the context and other internal states.
+        self.reset();
+
+        // Push the checkpoint tokens into the context, which will also initialize logits for the last token.
+        self.push_tokens(&checkpoint.tokens);
+
+        // Restore the creativity if we are lower, then give it a slight nudge towards 1.0 to ensure new results after restoring a checkpoint.
+        let creativity = checkpoint.creativity.max(self.creativity);
+        self.creativity =
+            (creativity * (CREATIVITY_UP_DIVISOR - 1.0) + 1.0) / CREATIVITY_UP_DIVISOR;
+
+        // Restore remaining internal states from the checkpoint
+        self.queued_text = checkpoint.queued_text;
+        self.outputs = checkpoint.outputs;
+        self.response_text = checkpoint.response_text;
+        self.supplied_outputs = checkpoint.supplied_outputs;
+        self.tokens_since_last_creativity_nudge =
+            CREATIVITY_NUDGE_DOWN_EVERY_N - CHECKPOINT_RESTORE_CREATIVITY_GRACE;
+
+        // Create a new sampler with an incremented seed to ensure new results after restoring a checkpoint.
+        self.seed = self.seed.wrapping_add(1);
+        self.sampler = new_sampler(self.creativity, self.seed);
     }
 
     /// Reset the inference job, clearing the context and other internal states.
@@ -236,8 +300,9 @@ impl<'a> Inference<'a> {
         if let Some(supplied_outputs) = &mut self.supplied_outputs {
             supplied_outputs.clear();
         }
+        self.tokens_since_last_creativity_nudge = 0;
     }
-
+    /*
     /// Truncate the context to a specific length.
     /// This should only be used when restoring to a checkpoint!!
     /// Returns true if truncation was performed, false if no truncation was needed.
@@ -253,9 +318,13 @@ impl<'a> Inference<'a> {
             self.unqueue_to_context(true);
         }
 
+        let old_len = self.tokens.len();
+        let len_diff = old_len as i32 - length as i32;
         self.tokens.truncate(length);
         self.context
             .clear_kv_cache_seq(Some(0), Some(length as u32), None)
+            .unwrap();
+        self.context.kv_cache_seq_add(0, Some(old_len as u32), None, len_diff)
             .unwrap();
         self.batch.clear();
         self.outputs.clear();
@@ -263,7 +332,7 @@ impl<'a> Inference<'a> {
         if let Some(supplied_outputs) = &mut self.supplied_outputs {
             supplied_outputs.clear();
         }
-    }
+    }*/
 
     /// Moves the content of the queued text into the context, initializing logits for the last token if specified.
     pub(crate) fn unqueue_to_context(&mut self, is_last_before_infer: bool) {
@@ -382,7 +451,11 @@ impl<'a> Inference<'a> {
     /// If this is an assistant message, then use `start_response_to_messages` to push the user and system messages first, then call this method.
     /// If `stop_sequences` is provided, generation will stop as soon as any of the sequences are generated.
     /// The encountered stop sequence will be included in the output, as well as remaining in the internal context.
-    pub fn infer(&mut self, max_tokens: Option<usize>, stop_sequences: &[&str]) -> InferenceResult {
+    pub fn infer<'b>(
+        &'b mut self,
+        max_tokens: Option<usize>,
+        stop_sequences: &[&str],
+    ) -> InferenceResult<'b> {
         // If we have queued text, push it to the context before generating.
         // Also measure this as prefill timing
         let prefill_start_time = std::time::Instant::now();
@@ -401,6 +474,16 @@ impl<'a> Inference<'a> {
         let timing_start_token_count = self.tokens.len();
         let mut encountered_stop_sequence = None;
         for _ in 0..max_tokens.unwrap_or(usize::MAX) {
+            // If we have sampled enough tokens since the last creativity nudge, nudge the creativity down towards 0.0.
+            if self.tokens_since_last_creativity_nudge >= CREATIVITY_NUDGE_DOWN_EVERY_N {
+                self.creativity =
+                    (self.creativity * (CREATIVITY_DOWN_DIVISOR - 1.0)) / CREATIVITY_DOWN_DIVISOR;
+                self.sampler = new_sampler(self.creativity, self.seed);
+                self.tokens_since_last_creativity_nudge = 1;
+            } else {
+                self.tokens_since_last_creativity_nudge += 1;
+            }
+
             // Generate the next token
             let token = self.sampler.sample(&self.context, -1);
 
@@ -497,7 +580,13 @@ impl<'a> Inference<'a> {
     /// Infer with output handling. The result is stored in the outputs map under the given name.
     /// If a value is found in the supplied outputs under the given name, it will be used instead of inferring.
     /// Also returns a mutable reference to the value stored in the outputs map under the given name, allowing further manipulation.
-    pub fn infer_output(&mut self, name: impl Display, stop_sequences: &[&str]) -> &mut String {
+    /// If `parse_json` is true, the inferred result will be parsed as JSON before being inserted into the outputs map.
+    pub fn infer_output(
+        &mut self,
+        name: impl Display,
+        stop_sequences: &[&str],
+        parse_json: bool,
+    ) -> &mut Value {
         let name = name.to_string();
 
         // Check if a value is supplied for this output name and use it if available.
@@ -524,8 +613,15 @@ impl<'a> Inference<'a> {
         let result = self.infer(None, stop_sequences);
         let result = result.content_without_stop_sequence().trim().to_string();
 
-        // Insert the inferred result into the outputs map.
-        self.outputs.insert(name.clone(), result);
+        // Parse the result as JSON if requested, otherwise insert as a string.
+        if parse_json {
+            self.outputs.insert(
+                name.clone(),
+                serde_json::from_str(&result).unwrap_or(Value::String(result)),
+            );
+        } else {
+            self.outputs.insert(name.clone(), Value::String(result));
+        }
 
         // Return a mutable reference to the value in the outputs map.
         self.outputs.get_mut(&name).unwrap()

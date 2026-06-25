@@ -417,9 +417,6 @@ impl<'a> Agent<'a> {
                 ),
             ));
 
-        // Log the user prompt for debugging purposes
-        dlog!("User Prompt:\n{}", user_prompt);
-
         // Push the user prompt to the chat
         self.chat.push_message(ChatRole::User, user_prompt);
 
@@ -434,7 +431,7 @@ impl<'a> Agent<'a> {
             if let Some(function_call) = response.function_call.as_ref() {
                 dlog!("Function call:\n{:#?}", function_call);
             } else {
-                dlog!("Response:\n{:#?}", response);
+                dlog!(!"Response:\n{:#?}", response);
             }
 
             // If there was a function call then execute it

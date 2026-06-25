@@ -1,4 +1,4 @@
-pub use serde_json::Value as JsonValue;
+pub type JsonValue = serde_json::Value;
 pub type JsonMap = serde_json::Map<String, JsonValue>;
 
 #[macro_export]
@@ -33,6 +33,14 @@ macro_rules! hmap {
 /// The messages are prefixed with "[DEBUG]" and colored in green for better visibility.
 #[macro_export]
 macro_rules! dlog {
+    // For debug messages that are important or cover many lines
+    (!$($arg:tt)*) => {
+        if cfg!(debug_assertions) {
+            use colored::Colorize;
+            println!("[{}] vvvvvvvvvv\n{}\n^^^^^^^^^^^^^^^", "DEBUG".bright_green().bold(), format!($($arg)*).green());
+        }
+    };
+    // For regular debug messages
     ($($arg:tt)*) => {
         if cfg!(debug_assertions) {
             use colored::Colorize;

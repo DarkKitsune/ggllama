@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt::Display, path::Path};
+use std::{fmt::Display, path::Path};
 
 use llama_cpp_4::{
     context::{LlamaContext, params::LlamaContextParams},
@@ -7,16 +7,34 @@ use llama_cpp_4::{
     quantize::GgmlType,
 };
 use static_init::dynamic;
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::{
     chat::Chat,
     inference::Inference,
     pipeline::Pipeline,
     prompt_formatter::{ListSection, PromptFormatter, TextSection},
+    util::{JsonMap, JsonValue},
+    wlog,
 };
 
 #[dynamic]
 static BACKEND: LlamaBackend = LlamaBackend::init().unwrap();
+
+#[dynamic]
+static LLAMA_TRACING_DISABLE: bool = {
+    // Suppress logs from the llama-cpp-4 crate while letting others through
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"))
+        .add_directive("llama_cpp_4=off".parse().unwrap()); // Use "trace" or "debug" if you ever need to turn it back on
+
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .with(filter)
+        .try_init()
+        .unwrap();
+    true
+};
 
 /// Defines how much to compress the context's KV cache for an inference job. Higher values will use less VRAM, but may result in worse performance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -114,17 +132,14 @@ impl Core {
         }
 
         /// Defines the structure of the input.
-        fn summarization_input(
-            formatter: PromptFormatter,
-            inputs: &HashMap<String, String>,
-        ) -> PromptFormatter {
+        fn summarization_input(formatter: PromptFormatter, inputs: &JsonMap) -> PromptFormatter {
             formatter.with_section(TextSection::new("Input Text", &inputs["input"]))
         }
 
         /// Defines the structure of the output.
-        fn summarization_output(inference: &mut Inference, _inputs: &HashMap<String, String>) {
+        fn summarization_output(inference: &mut Inference, _inputs: &JsonMap) {
             inference.push_text("## Summary\n```\n");
-            inference.infer_output("output", &["```"]);
+            inference.infer_output("output", &["```"], false);
         }
 
         // Create a summarization pipeline
@@ -171,19 +186,16 @@ impl Core {
         }
 
         /// Defines the structure of the input.
-        fn json_builder_input(
-            formatter: PromptFormatter,
-            inputs: &HashMap<String, String>,
-        ) -> PromptFormatter {
+        fn json_builder_input(formatter: PromptFormatter, inputs: &JsonMap) -> PromptFormatter {
             formatter
                 .with_section(TextSection::new("Template", &inputs["template"]))
                 .with_section(TextSection::new("Prompt", &inputs["prompt"]))
         }
 
         /// Defines the structure of the output.
-        fn json_builder_output(inference: &mut Inference, _inputs: &HashMap<String, String>) {
+        fn json_builder_output(inference: &mut Inference, _inputs: &JsonMap) {
             inference.push_text("## JSON Output\n```json\n");
-            inference.infer_output("output", &["```"]);
+            inference.infer_output("output", &["```"], true);
         }
 
         // Create a JSON builder pipeline
@@ -226,18 +238,17 @@ impl Core {
         }
 
         /// Defines the structure of the input.
-        fn multiple_choice_input(
-            formatter: PromptFormatter,
-            inputs: &HashMap<String, String>,
-        ) -> PromptFormatter {
+        fn multiple_choice_input(formatter: PromptFormatter, inputs: &JsonMap) -> PromptFormatter {
             formatter
                 .with_section(TextSection::new("Question", &inputs["question"]))
                 // Split the options by '|', limit the number, and append the corresponding letters
                 .with_section(TextSection::new(
                     "Options",
                     &inputs["options"]
-                        .split('|')
-                        .map(|s| s.trim())
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|s| s.as_str().unwrap().trim())
                         .take(IDX_TO_LETTER.len())
                         .enumerate()
                         .map(|(i, option)| format!("{}. `{}`", IDX_TO_LETTER[i], option))
@@ -247,37 +258,41 @@ impl Core {
         }
 
         /// Defines the structure of the output.
-        fn multiple_choice_output(inference: &mut Inference, inputs: &HashMap<String, String>) {
+        fn multiple_choice_output(inference: &mut Inference, inputs: &JsonMap) {
             // Format the output as a JSON object containing the answer letter.
             inference.push_text("```json\n{\"answer\": \"");
 
             // Loop until a valid answer letter and index is found.
             let checkpoint = inference.create_checkpoint();
             let mut answer_index: Option<usize> = None;
-            let mut output = &mut String::new();
+            let mut output = &mut JsonValue::Null;
             while answer_index.is_none() {
                 inference.restore_checkpoint(checkpoint.clone());
 
                 // Output the grade letter from the model.
-                output = inference.infer_output("output", &["\"}", "}"]);
+                output = inference.infer_output("output", &["\"}", "}"], false);
 
                 // Look up the index of the answer letter in IDX_TO_LETTER using the first character of output
-                let answer_letter = output.chars().next().unwrap_or(' ');
+                let answer_letter = output.as_str().unwrap().chars().next().unwrap_or(' ');
                 answer_index = IDX_TO_LETTER.iter().position(|&c| c == answer_letter);
             }
             // At this point, answer_index is guaranteed to be Some, so unwrap is safe.
             let answer_index = answer_index.unwrap();
 
             // Retrieve the answer text using the answer index, and store it in the output variable.
-            *output = inputs["options"]
-                .split('|')
-                .map(|s| s.trim())
-                .take(IDX_TO_LETTER.len())
-                .enumerate()
-                .find(|(i, _)| *i == answer_index)
-                .map(|(_, option)| option)
-                .unwrap()
-                .to_string();
+            *output = JsonValue::String(
+                inputs["options"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|s| s.as_str().unwrap().trim())
+                    .take(IDX_TO_LETTER.len())
+                    .enumerate()
+                    .find(|(i, _)| *i == answer_index)
+                    .map(|(_, option)| option)
+                    .unwrap()
+                    .to_string(),
+            );
 
             // End the code block already
             inference.push_text("\n```");
@@ -291,6 +306,162 @@ impl Core {
             move |formatter| multiple_choice_system(formatter, role.to_string()),
             multiple_choice_input,
             multiple_choice_output,
+            &[],
+            None,
+        )
+    }
+
+    /// Creates a new pipeline for deciding the next turn in a `Scene`.
+    /// This pipeline will determine the next action or dialogue turn for characters, or the next narration turn in the scene based on the current state and inputs.
+    /// The input for this pipeline should include a key "scene" with the string representation of the scene as its value.
+    pub fn new_scene_writer<'a>(&'a self) -> Pipeline<'a> {
+        /// Defines the structure of the system prompt.
+        fn scene_writer_system(formatter: PromptFormatter) -> PromptFormatter {
+            formatter
+            .with_section(TextSection::new(
+                "Your Role",
+                "You are a script writer for an adventure game."
+            ))
+            .with_section(TextSection::new(
+                "Your Task",
+                "The user will give you an unfinished scene under \"Unfinished Scene\". \
+                Please determine the next \"turn\" in the scene, whether it is an action, dialogue, or narration turn."
+            ))
+            .with_section(TextSection::new(
+                "Response Format",
+"Respond with the next turn in one of the following JSON formats depending on the type.
+If the turn is an action turn, it should follow this format:
+```json
+{\"turn_type\": \"action\", \"character_name\": \"Character listed in 'Controllable Characters'\", \"content\": \"Description of character performing action\"}
+```
+If the turn is a dialogue turn, it should follow this format:
+```json
+{\"turn_type\": \"dialogue\", \"character_name\": \"Character listed in 'Controllable Characters'\", \"content\": \"What to say\"}
+```
+If the turn is a narration turn, it should follow this format:
+```json
+{\"turn_type\": \"narration\", \"content\": \"Narration content\"}
+```
+Be creative, let every character have a chance to shine, and keep the story interesting!"
+            ))
+        }
+
+        /// Defines the structure of the input for the scene writer pipeline.
+        fn scene_writer_input(formatter: PromptFormatter, inputs: &JsonMap) -> PromptFormatter {
+            // Get the controllable_characters from inputs
+            let controllable_characters = inputs["controllable_characters"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c.as_str().unwrap().to_string())
+                .collect::<Vec<String>>();
+
+            formatter
+                .with_section(TextSection::new(
+                    "Unfinished Scene",
+                    inputs["scene"].as_str().unwrap(),
+                ))
+                .with_section(ListSection::new(
+                    "Controllable Characters",
+                    false,
+                    controllable_characters,
+                ))
+        }
+
+        /// Defines the structure of the output.
+        fn scene_writer_output(inference: &mut Inference, inputs: &JsonMap) {
+            // Get the controllable_characters from inputs
+            let controllable_characters = inputs["controllable_characters"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c.as_str().unwrap().to_string())
+                .collect::<Vec<String>>();
+            // Set up for inferring the turn type
+            inference.push_text("```json\n{\"turn_type\": \"");
+
+            // Save the current state of the inference engine.
+            let checkpoint = inference.create_checkpoint();
+
+            // We will loop here upon failure
+            loop {
+                // Infer the turn type
+                let turn_type = inference
+                    .infer_output("turn_type", &["\""], false)
+                    .as_str()
+                    .unwrap()
+                    .to_string();
+
+                // If the turn type is invalid, retry.
+                if !["action", "dialogue", "narration"].contains(&turn_type.as_str()) {
+                    wlog!("Invalid turn type inferred: {}. Retrying...", turn_type);
+                    inference.restore_checkpoint(checkpoint.clone());
+                    continue;
+                }
+
+                // Infer the character name if the turn type is dialogue or action
+                let character_name = if turn_type == "dialogue" || turn_type == "action" {
+                    // Set up for inferring the character name
+                    inference.push_text(", \"character_name\": \"");
+
+                    // Infer the character name
+                    let character_name = inference
+                        .infer_output("character_name", &["\""], false)
+                        .as_str()
+                        .unwrap()
+                        .to_string();
+
+                    // If the character is not controllable, retry.
+                    if !controllable_characters.contains(&character_name) {
+                        wlog!(
+                            "Invalid character name inferred: {}. Retrying...",
+                            character_name
+                        );
+                        inference.restore_checkpoint(checkpoint.clone());
+                        continue;
+                    }
+
+                    Some(character_name)
+                } else {
+                    None
+                };
+
+                // Set up for inferring the content
+                inference.push_text(", \"content\": \"");
+
+                // Infer the content
+                let content = inference
+                    .infer_output("content", &["\""], false)
+                    .as_str()
+                    .unwrap()
+                    .to_string();
+
+                // If this is a dialogue turn, ensure that the content doesn't start with the character's name. If it does, retry.
+                if turn_type == "dialogue" && content.starts_with(&character_name.unwrap()) {
+                    wlog!(
+                        "Content starts with character's name: {}. Retrying...",
+                        content
+                    );
+                    inference.restore_checkpoint(checkpoint.clone());
+                    continue;
+                }
+
+                // If we reach here, everything is valid so we can break the loop
+                break;
+            }
+
+            // Finish the the JSON block
+            inference.push_text("}\n```");
+        }
+
+        // Create the pipeline
+        Pipeline::new(
+            self,
+            0.5,
+            false,
+            scene_writer_system,
+            scene_writer_input,
+            scene_writer_output,
             &[],
             None,
         )
