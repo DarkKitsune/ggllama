@@ -36,10 +36,12 @@ fn main() {
     let mut pipeline = core.new_scene_writer();
 
     // Infer several turns
+    let mut turns = Vec::new();
     for _ in 0..7 {
-        scene.infer_next_turn(&mut pipeline);
+        let turn = scene.infer_next_turn(&mut pipeline);
+        turns.push(turn.clone());
     }
 
     // Print the final state of the scene
-    dlog!(!"Final scene:\n{}", scene);
+    dlog!(!"Turns:\n{:#?}\n\nFinal scene:\n{}", turns, scene);
 }

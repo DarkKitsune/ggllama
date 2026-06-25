@@ -230,7 +230,7 @@ impl Scene {
     }
 
     /// Infer the next turn in the scene using the given scene writer pipeline.
-    pub fn infer_next_turn(&mut self, pipeline: &mut Pipeline) {
+    pub fn infer_next_turn(&mut self, pipeline: &mut Pipeline) -> &Turn {
         let inputs = map! {
             "scene" => self.to_string(),
             "controllable_characters" => self.controllable_characters(),
@@ -253,8 +253,10 @@ impl Scene {
             "narration" => {
                 self.add_narration(content);
             }
-            _ => {}
+            _ => {unimplemented!("Unknown turn type: {}", output["turn_type"].as_str().unwrap());}
         }
+
+        self.turns.last().unwrap()
     }
 }
 
