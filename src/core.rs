@@ -7,7 +7,6 @@ use llama_cpp_4::{
     quantize::GgmlType,
 };
 use static_init::dynamic;
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::{
     chat::Chat,
@@ -20,21 +19,6 @@ use crate::{
 
 #[dynamic]
 static BACKEND: LlamaBackend = LlamaBackend::init().unwrap();
-
-#[dynamic]
-static LLAMA_TRACING_DISABLE: bool = {
-    // Suppress logs from the llama-cpp-4 crate while letting others through
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"))
-        .add_directive("llama_cpp_4=off".parse().unwrap()); // Use "trace" or "debug" if you ever need to turn it back on
-
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer())
-        .with(filter)
-        .try_init()
-        .unwrap();
-    true
-};
 
 /// Defines how much to compress the context's KV cache for an inference job. Higher values will use less VRAM, but may result in worse performance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -118,27 +102,25 @@ impl Core {
                 .with_section(TextSection::new(
                     "Your Role",
                     "You are an expert in summarizing long texts. \
-                    The user will provide text to summarize in an \"Input Text\" section.",
-                ))
-                .with_section(ListSection::new(
-                    "Guidelines For Summarization",
-                    false,
-                    vec![
-                        "Keep summaries concise.".to_string(),
-                        "Highlight key points.".to_string(),
-                        "Avoid unnecessary details.".to_string(),
-                    ],
+                    User will provide text to summarize, and you must summarize it in a clear and concise manner. \
+                    Include all important details.",
                 ))
         }
 
         /// Defines the structure of the input.
         fn summarization_input(formatter: PromptFormatter, inputs: &JsonMap) -> PromptFormatter {
-            formatter.with_section(TextSection::new("Input Text", &inputs["input"]))
+            formatter.with_section(TextSection::new(
+                "Input Text",
+                format!(
+                    "Please summarize the following text:\n```\n{}\n```",
+                    inputs["input"]
+                ),
+            ))
         }
 
         /// Defines the structure of the output.
         fn summarization_output(inference: &mut Inference, _inputs: &JsonMap) {
-            inference.push_text("## Summary\n```\n");
+            inference.push_text("## Summary\nHere is the summarized text:\n```\n");
             inference.infer_output("output", &["```"], false);
         }
 

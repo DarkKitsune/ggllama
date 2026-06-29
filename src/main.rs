@@ -1,47 +1,33 @@
 use ggllama::{
     core::{CompressionLevel, Core},
-    dlog, hmap,
+    dlog, hmap, map,
     scene::{CharacterData, Scene},
 };
 
 fn main() {
     // Initialize the core with the model and some KV cache quantization/compression
     let core = Core::from_model(
-        "models/Qwen3.5-4B-ARA-heresy-v2.i1-Q5_K_M.gguf",
+        "models/LFM2.5-8B-A1B-Opus-Distil-Q5_K_M.gguf",
         CompressionLevel::Medium,
     );
 
-    // Create a new scene with an opening narration
-    let mut scene = Scene::new(
-        "Opening Scene",
-        "The story begins in a small village.",
-        hmap! {
-            "Mina".to_string() => CharacterData::new(
-                "The protagonist of the story, and main character of the adventure. She is curious and excitable, and she wields a magical staff.",
-                true,
-            ),
-            "Bruno".to_string() => CharacterData::new(
-                "A supporting character in the story, and friend of Mina. He is loyal and brave and wields a sword.",
-                true,
-            ),
-            "Jax".to_string() => CharacterData::new(
-                "A supporting character in the story, and friend of Mina. He is clever and resourceful and wields a bow. He is also an expert in knowledge.",
-                true,
-            ),
-        },
-        "It is a quiet morning in the village. Mina is walking through the streets with Bruno and Jax.",
-    );
+    // Text to summarize
+    let text_to_summarize = "Once upon a time in a small village, there lived a young girl named Mina. \
+    She was curious and excitable, always eager to explore the world around her. \
+    Mina had a magical staff that she used to help the villagers with their daily tasks and to protect them from any dangers that arose. \
+    One day, a mysterious traveler arrived in the village, bringing news of an impending threat that could endanger the entire village. \
+    Mina knew she had to use her magical staff to protect her home and the people she cared about. \
+    And so, Mina embarked on a courageous journey to confront the impending threat, using her magical staff to protect her village and its inhabitants.";
 
-    // Create a scene writer pipeline
-    let mut pipeline = core.new_scene_writer();
+    // Create a summarization pipeline and summarize the text
+    let mut summarizer = core.new_summarizer();
 
-    // Infer several turns
-    let mut turns = Vec::new();
-    for _ in 0..7 {
-        let turn = scene.infer_next_turn(&mut pipeline);
-        turns.push(turn.clone());
-    }
+    // Summarize the text
+    let inputs = map! {
+        "input" => text_to_summarize.to_string(),
+    };
+    let outputs = summarizer.run(&inputs);
 
-    // Print the final state of the scene
-    dlog!(!"Turns:\n{:#?}\n\nFinal scene:\n{}", turns, scene);
+    // Print the summarized text
+    println!("Summary:\n{}", outputs.get("output").unwrap());
 }

@@ -253,7 +253,12 @@ impl Scene {
             "narration" => {
                 self.add_narration(content);
             }
-            _ => {unimplemented!("Unknown turn type: {}", output["turn_type"].as_str().unwrap());}
+            _ => {
+                unimplemented!(
+                    "Unknown turn type: {}",
+                    output["turn_type"].as_str().unwrap()
+                );
+            }
         }
 
         self.turns.last().unwrap()
