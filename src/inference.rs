@@ -714,12 +714,15 @@ impl<'a> Inference<'a> {
         if self.use_gemma_channels {
             self.push_text(&format!(
                 "<|channel>{}\n{}<channel|>\n",
-                channel_name.as_ref(), content.as_ref()
+                channel_name.as_ref(),
+                content.as_ref()
             ));
         } else {
             self.push_text(&format!(
                 "<{}>\n{}</{}>\n",
-                channel_name.as_ref(), content.as_ref(), channel_name.as_ref()
+                channel_name.as_ref(),
+                content.as_ref(),
+                channel_name.as_ref()
             ));
         }
     }
@@ -727,23 +730,20 @@ impl<'a> Inference<'a> {
     /// Terminate the current response message by pushing the EOT token into the context.
     pub(crate) fn end_response(&mut self) {
         let eot_token = self.model().token_eot();
-        
+
         if eot_token.0 < 0 {
             if self.use_gemma_channels {
                 self.push_text("<turn|>\n");
-            }
-            else {
+            } else {
                 let eos_token = self.model().token_eos();
 
                 if eos_token.0 < 0 {
                     self.push_text("<|im_end|>\n");
-                }
-                else {
+                } else {
                     self.push_tokens(&[eos_token]);
                 }
             }
-        }
-        else {
+        } else {
             self.push_tokens(&[eot_token]);
         }
     }
