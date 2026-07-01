@@ -7,27 +7,43 @@ use ggllama::{
 fn main() {
     // Initialize the core with the model and some KV cache quantization/compression
     let core = Core::from_model(
-        "models/LFM2.5-8B-A1B-Opus-Distil-Q5_K_M.gguf",
+        "models/Qwen3.5-4B-ARA-heresy-v2.i1-Q5_K_M.gguf",
         CompressionLevel::Medium,
     );
 
-    // Text to summarize
-    let text_to_summarize = "Once upon a time in a small village, there lived a young girl named Mina. \
-    She was curious and excitable, always eager to explore the world around her. \
-    Mina had a magical staff that she used to help the villagers with their daily tasks and to protect them from any dangers that arose. \
-    One day, a mysterious traveler arrived in the village, bringing news of an impending threat that could endanger the entire village. \
-    Mina knew she had to use her magical staff to protect her home and the people she cared about. \
-    And so, Mina embarked on a courageous journey to confront the impending threat, using her magical staff to protect her village and its inhabitants.";
+    // Create a scene writer
+    let mut writer = core.new_scene_writer();
 
-    // Create a summarization pipeline and summarize the text
-    let mut summarizer = core.new_summarizer();
+    // Create a turn extractor
+    let mut turn_extractor = core.new_turn_extractor();
 
-    // Summarize the text
-    let inputs = map! {
-        "input" => text_to_summarize.to_string(),
-    };
-    let outputs = summarizer.run(&inputs);
+    // Create a new scene
+    let mut scene = Scene::new(
+        hmap! {
+            "Alice".to_string() => CharacterData {
+                role: "You, the protagonist".to_string(),
+                controllable: true,
+            },
+            "Bob".to_string() => CharacterData {
+                role: "Sidekick".to_string(),
+                controllable: true,
+            },
+        },
+        "You are Alice, the protagonist of this story. You are standing in a small village with your sidekick, \
+        Bob, ready to embark on an adventure.".to_string(),
+    );
 
-    // Print the summarized text
-    println!("Summary:\n{}", outputs.get("output").unwrap());
+    // Infer a few turns
+    for _ in 0..3 {
+        scene.infer_turn(&mut writer);
+    }
+
+    // Print the initial state of the scene
+    dlog!(!"Initial Scene:\n{}", scene);
+
+    // Send a command to tell Alice to do something
+    scene.execute_command("Alice", "betray Bob, kill him", &mut turn_extractor);
+
+    // Print the state of the scene after the command
+    dlog!(!"Scene After Command:\n{}", scene);
 }

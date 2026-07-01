@@ -295,7 +295,8 @@ impl Core {
 
     /// Creates a new pipeline for deciding the next turn in a `Scene`.
     /// This pipeline will determine the next action or dialogue turn for characters, or the next narration turn in the scene based on the current state and inputs.
-    /// The input for this pipeline should include a key "scene" with the string representation of the scene as its value.
+    /// The input for this pipeline should include a key "scene" with the string representation of the scene as its value,
+    /// and a key "controllable_characters" with an array of character names that can be controlled by the scene writer.
     pub fn new_scene_writer<'a>(&'a self) -> Pipeline<'a> {
         /// Defines the structure of the system prompt.
         fn scene_writer_system(formatter: PromptFormatter) -> PromptFormatter {
@@ -314,15 +315,15 @@ impl Core {
 "Respond with the next turn in one of the following JSON formats depending on the type.
 If the turn is an action turn, it should follow this format:
 ```json
-{\"turn_type\": \"action\", \"character_name\": \"Character listed in 'Controllable Characters'\", \"content\": \"Description of character performing action\"}
+{\"turn_type\": \"action\", \"character_name\": \"<Controllable Character>\", \"content\": \"<Action Description>\"}
 ```
 If the turn is a dialogue turn, it should follow this format:
 ```json
-{\"turn_type\": \"dialogue\", \"character_name\": \"Character listed in 'Controllable Characters'\", \"content\": \"What to say\"}
+{\"turn_type\": \"dialogue\", \"character_name\": \"<Controllable Character>\", \"content\": \"<What They Say>\"}
 ```
 If the turn is a narration turn, it should follow this format:
 ```json
-{\"turn_type\": \"narration\", \"content\": \"Narration content\"}
+{\"turn_type\": \"narration\", \"content\": \"<Narration Content>\"}
 ```
 Be creative, let every character have a chance to shine, and keep the story interesting!"
             ))
@@ -439,11 +440,131 @@ Be creative, let every character have a chance to shine, and keep the story inte
         // Create the pipeline
         Pipeline::new(
             self,
-            0.5,
+            0.7,
             false,
             scene_writer_system,
             scene_writer_input,
             scene_writer_output,
+            &[],
+            None,
+        )
+    }
+
+    /// Creates a new pipeline for parsing a natural language command into a turn from a given character's perspective.
+    /// The inputs to this pipeline are "scene" which is a string representation of the current state of the scene,
+    /// "command" which is the natural language command to be parsed into a turn,
+    /// "character" which is the name of the character from whose perspective the command should be parsed into a turn.
+    /// The outputs of this pipeline are the keys "turn_type" and "content" in a JSON object,
+    /// representing the type of turn, and the content of the turn, respectively.
+    pub fn new_turn_extractor<'a>(&'a self) -> Pipeline<'a> {
+        /// Defines the structure of the system prompt
+        fn turn_extractor_system(formatter: PromptFormatter) -> PromptFormatter {
+            formatter
+                .with_section(TextSection::new(
+                    "Your Role",
+                    "You are an assistant tasked with converting natural language commands into action or dialog turns for characters in a scene."
+                ))
+                .with_section(TextSection::new(
+                    "Your Task",
+                    "The user will give you the scene so far under \"Scene\", a character named under \"Character\", \
+                    and a command for that character to follow under \"Command\"."
+                ))
+                .with_section(TextSection::new(
+                    "How to Respond",
+                    "You should respond with JSON representing the character following the command in the scene.\n\
+                    If the command involves the character performing an action, respond with the following JSON format:
+```json
+{\"turn_type\": \"action\", \"content\": \"<Description of Action>\"}
+```\n\
+                    If the command involves the character speaking, respond with the following JSON format:
+```json
+{\"turn_type\": \"dialogue\", \"content\": \"<What They Say>\"}
+```\n\
+                    For example, if the command is \"Do a funny little dance in front of the goblins\" and the character is named \"Alice\", the response could be:
+```json
+{\"turn_type\": \"action\", \"content\": \"Alice performs a funny little dance, to the goblins' amusement.\"}
+```\n\
+                    Make it creative and interesting where appropriate!"
+                ))
+        }
+
+        /// Defines the structure of the input
+        fn turn_extractor_input(formatter: PromptFormatter, inputs: &JsonMap) -> PromptFormatter {
+            formatter
+                .with_section(TextSection::new("Scene", inputs["scene"].as_str().unwrap()))
+                .with_section(TextSection::new(
+                    "Character",
+                    inputs["character"].as_str().unwrap(),
+                ))
+                .with_section(TextSection::new(
+                    "Command",
+                    inputs["command"].as_str().unwrap(),
+                ))
+        }
+
+        /// Defines the structure of the output
+        fn turn_extractor_output(inference: &mut Inference, inputs: &JsonMap) {
+            // Extract the character's name from the inputs for later use.
+            let character_name = inputs["character"].as_str().unwrap().trim();
+
+            // Start the JSON and set up for inferring the turn type
+            inference.push_text("```json\n{\"turn_type\": \"");
+
+            // Save the current state of the inference engine.
+            let checkpoint = inference.create_checkpoint();
+
+            // We will loop here upon failure
+            loop {
+                // Infer the turn type
+                let turn_type = inference
+                    .infer_output("turn_type", &["\""], false)
+                    .as_str()
+                    .unwrap()
+                    .to_string();
+
+                // If the turn type is invalid, retry.
+                if !["action", "dialogue"].contains(&turn_type.as_str()) {
+                    wlog!("Invalid turn type inferred: {}. Retrying...", turn_type);
+                    inference.restore_checkpoint(checkpoint.clone());
+                    continue;
+                }
+
+                // Set up for inferring the content
+                inference.push_text(", \"content\": \"");
+
+                // Infer the content
+                let content = inference
+                    .infer_output("content", &["\""], false)
+                    .as_str()
+                    .unwrap()
+                    .to_string();
+
+                // If this is a dialogue turn, ensure that the content doesn't start with the character's name. If it does, retry.
+                if turn_type == "dialogue" && content.starts_with(character_name) {
+                    wlog!(
+                        "Content starts with character's name: {}. Retrying...",
+                        content
+                    );
+                    inference.restore_checkpoint(checkpoint.clone());
+                    continue;
+                }
+
+                // If the turn type is valid, break out of the loop.
+                break;
+            }
+
+            // Finish the the JSON block
+            inference.push_text("}\n```");
+        }
+
+        // Create the pipeline
+        Pipeline::new(
+            self,
+            0.7,
+            false,
+            turn_extractor_system,
+            turn_extractor_input,
+            turn_extractor_output,
             &[],
             None,
         )

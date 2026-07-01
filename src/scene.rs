@@ -107,10 +107,6 @@ impl Display for Turn {
 
 /// Represents a scene consisting of multiple turns.
 pub struct Scene {
-    /// A name for the scene.
-    name: String,
-    /// A description of the scene.
-    description: String,
     /// The turns that make up the scene. This should only be modified through the correct methods to maintain consistency.
     turns: Vec<Turn>,
     /// The characters currently in the scene. This should be updated when adding turns.
@@ -120,14 +116,10 @@ pub struct Scene {
 impl Scene {
     /// Creates a new empty scene.
     pub fn new(
-        name: impl Display,
-        description: impl Display,
         characters: HashMap<String, CharacterData>,
         opening_narration: impl Display,
     ) -> Self {
         Scene {
-            name: name.to_string(),
-            description: description.to_string(),
             turns: vec![Turn::Narration {
                 content: opening_narration.to_string(),
             }],
@@ -146,7 +138,7 @@ impl Scene {
     }
 
     /// Adds a turn to the scene.
-    pub fn add_turn(&mut self, turn: Turn) {
+    pub fn add_turn(&mut self, turn: Turn) -> &Turn {
         if let Some(character) = turn.character() {
             if let Some((_, data)) = turn.entering_character() {
                 if !self.characters.contains_key(character) {
@@ -157,6 +149,7 @@ impl Scene {
             }
         }
         self.turns.push(turn);
+        self.turns.last().unwrap()
     }
 
     /// Adds a turn to the scene and returns self for chaining.
@@ -166,12 +159,13 @@ impl Scene {
     }
 
     /// Adds a dialogue turn to the scene.
-    pub fn add_dialogue(&mut self, character: &str, content: impl Display) {
+    pub fn add_dialogue(&mut self, character: &str, content: impl Display) -> &Turn {
         let turn = Turn::Dialogue {
             character: character.to_string(),
             content: content.to_string(),
         };
         self.add_turn(turn);
+        self.turns.last().unwrap()
     }
 
     /// Adds a dialogue turn to the scene and returns self for chaining.
@@ -181,13 +175,19 @@ impl Scene {
     }
 
     /// Adds an action turn to the scene.
-    pub fn add_action(&mut self, character: &str, description: impl Display, travel: TravelType) {
+    pub fn add_action(
+        &mut self,
+        character: &str,
+        description: impl Display,
+        travel: TravelType,
+    ) -> &Turn {
         let turn = Turn::Action {
             character: character.to_string(),
             description: description.to_string(),
             travel,
         };
         self.add_turn(turn);
+        self.turns.last().unwrap()
     }
 
     /// Adds an action turn to the scene and returns self for chaining.
@@ -202,11 +202,12 @@ impl Scene {
     }
 
     /// Adds a narrative turn to the scene.
-    pub fn add_narration(&mut self, content: impl Display) {
+    pub fn add_narration(&mut self, content: impl Display) -> &Turn {
         let turn = Turn::Narration {
             content: content.to_string(),
         };
         self.add_turn(turn);
+        self.turns.last().unwrap()
     }
 
     /// Adds a narrative turn to the scene and returns self for chaining.
@@ -230,16 +231,20 @@ impl Scene {
     }
 
     /// Infer the next turn in the scene using the given scene writer pipeline.
-    pub fn infer_next_turn(&mut self, pipeline: &mut Pipeline) -> &Turn {
+    pub fn infer_turn(&mut self, scene_writer_pipeline: &mut Pipeline) -> &Turn {
+        // Prepare the inputs for the scene writer pipeline. This includes the current state of the scene and the list of controllable characters.
         let inputs = map! {
             "scene" => self.to_string(),
             "controllable_characters" => self.controllable_characters(),
         };
 
-        let output = pipeline.run(&inputs);
+        // Run the scene writer pipeline with the prepared inputs to infer the next turn.
+        let output = scene_writer_pipeline.run(&inputs);
 
+        // Get the "content" key regardless
         let content = output["content"].as_str().unwrap();
 
+        // Determine the type of turn inferred by the scene writer pipeline and add it to the scene accordingly.
         match output["turn_type"].as_str().unwrap() {
             "dialogue" => {
                 let character = output["character_name"].as_str().unwrap();
@@ -263,13 +268,50 @@ impl Scene {
 
         self.turns.last().unwrap()
     }
+
+    /// Executes a command from the perspective of a character in the scene.
+    /// The command will be parsed into one or more turns.
+    /// Each turn will be added to the scene.
+    pub fn execute_command(
+        &mut self,
+        character: &str,
+        command: &str,
+        turn_extractor_pipeline: &mut Pipeline,
+    ) -> &Turn {
+        // Prepare the inputs for the turn extractor pipeline.
+        let inputs = map! {
+            "scene" => self.to_string(),
+            "character" => character,
+            "command" => command,
+        };
+
+        // Run the turn extractor pipeline with the prepared inputs to extract a turn from the command.
+        let output = turn_extractor_pipeline.run(&inputs);
+
+        // Get the "content" key regardless
+        let content = output["content"].as_str().unwrap();
+
+        // Determine the type of turn inferred by the turn extractor pipeline and add it to the scene accordingly.
+        let turn = match output["turn_type"].as_str().unwrap() {
+            "dialogue" => self.add_dialogue(character, content),
+            "action" => {
+                let travel = TravelType::None;
+                self.add_action(character, content, travel)
+            }
+            _ => {
+                unimplemented!(
+                    "Unknown turn type: {}",
+                    output["turn_type"].as_str().unwrap()
+                );
+            }
+        };
+        turn
+    }
 }
 
 impl Display for Scene {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // We must format this in a way that the model can understand and expand on.
-        writeln!(f, "Scene: {}", self.name)?;
-        writeln!(f, "Description: {}", self.description)?;
         writeln!(f, "Characters:")?;
         for (name, data) in &self.characters {
             writeln!(f, "- {}: {}", name, data.role)?;
