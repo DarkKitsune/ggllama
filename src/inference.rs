@@ -38,7 +38,7 @@ fn new_sampler(creativity: f32, seed: u32) -> LlamaSampler {
     let target_probability = if creativity < 0.0001 {
         -1.0
     } else {
-        1.0 - creativity * 0.6
+        1.0 - creativity * 0.55
     };
 
     // Create adaptive sampler which only samples tokens that aren't very unlikely
@@ -124,6 +124,8 @@ pub struct Inference<'a> {
     /// We queue text that must be added to the context until the next generation call, at which point we add it and then clear the queue.
     /// This allows us to properly initialize logits before generating.
     queued_text: String,
+    /// Flag indicating whether to use Gemma 4 style channels for reasoning.
+    use_gemma_channels: bool,
 }
 
 impl ChatRole {
@@ -178,6 +180,7 @@ impl<'a> Inference<'a> {
             supplied_outputs: None,
             queued_text: String::new(),
             tokens_since_last_creativity_nudge: 0,
+            use_gemma_channels: core.use_gemma_format,
         }
     }
 
@@ -630,23 +633,47 @@ impl<'a> Inference<'a> {
     /// Generate a reasoning trace in the context, and return the string.
     pub(crate) fn think(&mut self, max_tokens: Option<usize>) -> String {
         // Start the <think> block
-        self.push_text("<think>");
+        if self.use_gemma_channels {
+            self.push_text("<|channel>thought");
+        } else {
+            self.push_text("<think>");
+        }
 
         // Generate the next `n` tokens, stopping if we generate the </think> token, then convert them to a string and return it.
-        let mut result = self.infer(max_tokens, &["</think>"]).content;
+        let mut result = self
+            .infer(
+                max_tokens,
+                if self.use_gemma_channels {
+                    &["<channel|>"]
+                } else {
+                    &["</think>"]
+                },
+            )
+            .content;
 
         // If we got the full trace then truncate the result to remove the </think> token
-        let ends_with_think = result.ends_with("</think>");
+        let ends_with_think = if self.use_gemma_channels {
+            result.ends_with("<channel|>")
+        } else {
+            result.ends_with("</think>")
+        };
         if ends_with_think {
-            result.truncate(result.find("</think>").unwrap());
+            if self.use_gemma_channels {
+                result.truncate(result.rfind("<channel|>").unwrap());
+            } else {
+                result.truncate(result.rfind("</think>").unwrap());
+            }
         }
 
         // If we didn't get the full trace, push the </think> token into the context to properly terminate the trace in the context. This is important for accurate token counting and for properly formatting the context for future generations.
         if !ends_with_think {
-            self.push_text("</think>");
+            if self.use_gemma_channels {
+                self.push_text("<channel|>");
+            } else {
+                self.push_text("</think>");
+            }
         }
 
-        // Push a newline
         self.push_text("\n");
 
         result.trim().to_string()
@@ -654,11 +681,70 @@ impl<'a> Inference<'a> {
 
     /// Push an empty reasoning trace into the context, causing the model to not use its reasoning capabilities (AKA thinking "disabled").
     pub(crate) fn no_think(&mut self) {
-        self.push_text("<think>\n\n</think>\n");
+        if self.use_gemma_channels {
+            self.push_text("<|channel>thought\n<channel|>\n");
+        } else {
+            self.push_text("<think>\n</think>\n");
+        }
+    }
+
+    /// Infer the contents of a channel/block with the given name
+    pub fn infer_channel(&mut self, channel_name: &str, max_tokens: Option<usize>) -> String {
+        let content = if self.use_gemma_channels {
+            self.push_text(&format!("<|channel>{}\n", channel_name));
+            self.infer(max_tokens, &["<channel|>"])
+                .content_without_stop_sequence()
+                .trim()
+                .to_string()
+        } else {
+            self.push_text(&format!("<{}>\n", channel_name));
+            self.infer(max_tokens, &[&format!("</{}>", channel_name)])
+                .content_without_stop_sequence()
+                .trim()
+                .to_string()
+        };
+
+        self.push_text("\n");
+
+        content
+    }
+
+    /// Push a channel/block with the given name and content
+    pub fn push_channel(&mut self, channel_name: impl AsRef<str>, content: impl AsRef<str>) {
+        if self.use_gemma_channels {
+            self.push_text(&format!(
+                "<|channel>{}\n{}<channel|>\n",
+                channel_name.as_ref(), content.as_ref()
+            ));
+        } else {
+            self.push_text(&format!(
+                "<{}>\n{}</{}>\n",
+                channel_name.as_ref(), content.as_ref(), channel_name.as_ref()
+            ));
+        }
     }
 
     /// Terminate the current response message by pushing the EOT token into the context.
     pub(crate) fn end_response(&mut self) {
-        self.push_tokens(&[self.model().token_eot()]);
+        let eot_token = self.model().token_eot();
+        
+        if eot_token.0 < 0 {
+            if self.use_gemma_channels {
+                self.push_text("<turn|>\n");
+            }
+            else {
+                let eos_token = self.model().token_eos();
+
+                if eos_token.0 < 0 {
+                    self.push_text("<|im_end|>\n");
+                }
+                else {
+                    self.push_tokens(&[eos_token]);
+                }
+            }
+        }
+        else {
+            self.push_tokens(&[eot_token]);
+        }
     }
 }

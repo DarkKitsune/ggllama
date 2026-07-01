@@ -35,17 +35,23 @@ pub enum CompressionLevel {
 pub struct Core {
     pub model: LlamaModel,
     pub compression: CompressionLevel,
+    pub use_gemma_format: bool,
 }
 
 impl Core {
     /// Loads a LLaMA model from the specified path and initializes a `Core` from it.
-    pub fn from_model(model_path: impl AsRef<Path>, context_compression: CompressionLevel) -> Self {
+    pub fn from_model(
+        model_path: impl AsRef<Path>,
+        context_compression: CompressionLevel,
+        use_gemma_format: bool,
+    ) -> Self {
         let params = LlamaModelParams::default().with_n_gpu_layers(99);
         let model = LlamaModel::load_from_file(&BACKEND, model_path, &params).unwrap();
 
         Self {
             model,
             compression: context_compression,
+            use_gemma_format,
         }
     }
 
@@ -440,7 +446,7 @@ Be creative, let every character have a chance to shine, and keep the story inte
         // Create the pipeline
         Pipeline::new(
             self,
-            0.7,
+            0.6,
             false,
             scene_writer_system,
             scene_writer_input,
@@ -484,7 +490,7 @@ Be creative, let every character have a chance to shine, and keep the story inte
 ```json
 {\"turn_type\": \"action\", \"content\": \"Alice performs a funny little dance, to the goblins' amusement.\"}
 ```\n\
-                    Make it creative and interesting where appropriate!"
+                    Make it creative and interesting but concise and easy to read. No more than 3 sentences."
                 ))
         }
 
@@ -560,7 +566,7 @@ Be creative, let every character have a chance to shine, and keep the story inte
         // Create the pipeline
         Pipeline::new(
             self,
-            0.7,
+            0.6,
             false,
             turn_extractor_system,
             turn_extractor_input,

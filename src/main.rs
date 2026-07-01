@@ -1,6 +1,6 @@
 use ggllama::{
     core::{CompressionLevel, Core},
-    dlog, hmap, map,
+    dlog, hmap,
     scene::{CharacterData, Scene},
 };
 
@@ -9,6 +9,7 @@ fn main() {
     let core = Core::from_model(
         "models/Qwen3.5-4B-ARA-heresy-v2.i1-Q5_K_M.gguf",
         CompressionLevel::Medium,
+        false,
     );
 
     // Create a scene writer

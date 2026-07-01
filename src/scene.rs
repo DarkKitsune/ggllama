@@ -270,8 +270,7 @@ impl Scene {
     }
 
     /// Executes a command from the perspective of a character in the scene.
-    /// The command will be parsed into one or more turns.
-    /// Each turn will be added to the scene.
+    /// The command will be parsed into a turn, which will be added to the scene.
     pub fn execute_command(
         &mut self,
         character: &str,
