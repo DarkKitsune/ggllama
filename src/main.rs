@@ -13,10 +13,10 @@ fn main() {
     );
 
     // Create a scene writer
-    let mut writer = core.new_scene_writer();
+    let mut writer = core.new_scene_writer(0.5, false);
 
     // Create a turn extractor
-    let mut turn_extractor = core.new_turn_extractor();
+    let mut turn_extractor = core.new_turn_extractor(0.5, false);
 
     // Create a new scene
     let mut scene = Scene::new(
@@ -35,7 +35,7 @@ fn main() {
     );
 
     // Infer a few turns
-    for _ in 0..3 {
+    for _ in 0..5 {
         scene.infer_turn(&mut writer);
     }
 

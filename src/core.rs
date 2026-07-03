@@ -140,13 +140,14 @@ impl Core {
             summarization_output,
             &[],
             Some(99999999),
+            false,
         )
     }
 
     /// Creates a new pipeline for generating JSON based on a given template.
     /// The input hashmap should contain a "template" key with the JSON template and a "prompt" key with the prompt for the JSON object.
     /// The output will be provided under the "output" key in the output hashmap.
-    pub fn new_json_builder<'a>(&'a self) -> Pipeline<'a> {
+    pub fn new_json_builder<'a>(&'a self, use_reasoning: bool) -> Pipeline<'a> {
         /// Defines the structure of the system prompt.
         fn json_builder_system(formatter: PromptFormatter) -> PromptFormatter {
             formatter
@@ -196,6 +197,7 @@ impl Core {
             json_builder_output,
             &[],
             None,
+            use_reasoning,
         )
     }
 
@@ -204,7 +206,11 @@ impl Core {
     /// and an "options" key with the possible answer options separated by '|'.
     /// The output will be provided under the "output" key in the output hashmap.
     /// There can only be up to 26 options, corresponding to letters A-Z.
-    pub fn new_multiple_choice<'a>(&'a self, role: impl Display + 'static) -> Pipeline<'a> {
+    pub fn new_multiple_choice<'a>(
+        &'a self,
+        role: impl Display + 'static,
+        use_reasoning: bool,
+    ) -> Pipeline<'a> {
         /// Map options to letters (A, B, C, ...)
         const IDX_TO_LETTER: [char; 26] = [
             'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q',
@@ -296,6 +302,7 @@ impl Core {
             multiple_choice_output,
             &[],
             None,
+            use_reasoning,
         )
     }
 
@@ -303,7 +310,7 @@ impl Core {
     /// This pipeline will determine the next action or dialogue turn for characters, or the next narration turn in the scene based on the current state and inputs.
     /// The input for this pipeline should include a key "scene" with the string representation of the scene as its value,
     /// and a key "controllable_characters" with an array of character names that can be controlled by the scene writer.
-    pub fn new_scene_writer<'a>(&'a self) -> Pipeline<'a> {
+    pub fn new_scene_writer<'a>(&'a self, creativity: f32, use_reasoning: bool) -> Pipeline<'a> {
         /// Defines the structure of the system prompt.
         fn scene_writer_system(formatter: PromptFormatter) -> PromptFormatter {
             formatter
@@ -325,7 +332,7 @@ If the turn is an action turn, it should follow this format:
 ```
 If the turn is a dialogue turn, it should follow this format:
 ```json
-{\"turn_type\": \"dialogue\", \"character_name\": \"<Controllable Character>\", \"content\": \"<What They Say>\"}
+{\"turn_type\": \"dialogue\", \"character_name\": \"<Controllable Character>\", \"content\": \"<Description of Character Speaking>\"}
 ```
 If the turn is a regular narration turn, it should follow this format:
 ```json
@@ -386,7 +393,9 @@ Be creative, let every character have a chance to shine, and keep the story inte
                     .to_string();
 
                 // If the turn type is invalid, retry.
-                if !["action", "dialogue", "narration", "narration_introduction"].contains(&turn_type.as_str()) {
+                if !["action", "dialogue", "narration", "narration_introduction"]
+                    .contains(&turn_type.as_str())
+                {
                     wlog!("Invalid turn type inferred: {}. Retrying...", turn_type);
                     inference.restore_checkpoint(checkpoint.clone());
                     continue;
@@ -422,21 +431,22 @@ Be creative, let every character have a chance to shine, and keep the story inte
                 // Set up for inferring the content
                 inference.push_text(", \"content\": \"");
 
-                // Infer the content
-                let content = inference
-                    .infer_output("content", &["\""], false)
-                    .as_str()
-                    .unwrap()
-                    .to_string();
+                // If this is a dialogue turn, start off the dialog description with the character's name.
+                if turn_type == "dialogue" {
+                    inference.push_text(&format!("{}: '", character_name.as_ref().unwrap()));
+                }
 
-                // If this is a dialogue turn, ensure that the content doesn't start with the character's name. If it does, retry.
-                if turn_type == "dialogue" && content.starts_with(&character_name.unwrap()) {
-                    wlog!(
-                        "Content starts with character's name: {}. Retrying...",
-                        content
-                    );
-                    inference.restore_checkpoint(checkpoint.clone());
-                    continue;
+                // Infer the content
+                let content = inference.infer_output("content", &["\""], false);
+
+                // If this is a dialogue turn, insert the name back into the beginning of the output.
+                if turn_type == "dialogue" {
+                    (*content) = format!(
+                        "{}: \"{}\"",
+                        character_name.unwrap(),
+                        content.as_str().unwrap()
+                    )
+                    .into();
                 }
 
                 // If this is a narration_introduction turn, do inference for the new character
@@ -476,13 +486,14 @@ Be creative, let every character have a chance to shine, and keep the story inte
         // Create the pipeline
         Pipeline::new(
             self,
-            0.5,
+            creativity,
             false,
             scene_writer_system,
             scene_writer_input,
             scene_writer_output,
             &[],
             None,
+            use_reasoning,
         )
     }
 
@@ -492,7 +503,7 @@ Be creative, let every character have a chance to shine, and keep the story inte
     /// "character" which is the name of the character from whose perspective the command should be parsed into a turn.
     /// The outputs of this pipeline are the keys "turn_type" and "content" in a JSON object,
     /// representing the type of turn, and the content of the turn, respectively.
-    pub fn new_turn_extractor<'a>(&'a self) -> Pipeline<'a> {
+    pub fn new_turn_extractor<'a>(&'a self, creativity: f32, use_reasoning: bool) -> Pipeline<'a> {
         /// Defines the structure of the system prompt
         fn turn_extractor_system(formatter: PromptFormatter) -> PromptFormatter {
             formatter
@@ -515,7 +526,7 @@ Be creative, let every character have a chance to shine, and keep the story inte
 ```\n\
                     If the command involves the character speaking, respond with the following JSON format:
 ```json
-{\"turn_type\": \"dialogue\", \"content\": \"<Description of Dialogue>\"}
+{\"turn_type\": \"dialogue\", \"content\": \"<Description of Character Speaking>\"}
 ```\n\
                     For example, if the command is \"Do a funny little dance in front of the goblins\" and the character is named \"Alice\", the response could be:
 ```json
@@ -571,16 +582,16 @@ Be creative, let every character have a chance to shine, and keep the story inte
 
                 // If this is a dialogue turn, start off the dialog description with the character's name.
                 if turn_type == "dialogue" {
-                    inference.push_text(&format!("{} ", character_name));
+                    inference.push_text(&format!("{}: '", character_name));
                 }
 
                 // Infer the content
-                let content = inference
-                    .infer_output("content", &["\""], false);
+                let content = inference.infer_output("content", &["\""], false);
 
                 // If this is a dialogue turn, insert the name back into the beginning of the output.
                 if turn_type == "dialogue" {
-                    (*content) = format!("{} {}", character_name, content.as_str().unwrap()).into();
+                    (*content) =
+                        format!("{}: \"{}\"", character_name, content.as_str().unwrap()).into();
                 }
 
                 // If the turn type is valid, break out of the loop.
@@ -594,13 +605,14 @@ Be creative, let every character have a chance to shine, and keep the story inte
         // Create the pipeline
         Pipeline::new(
             self,
-            0.5,
+            creativity,
             false,
             turn_extractor_system,
             turn_extractor_input,
             turn_extractor_output,
             &[],
             None,
+            use_reasoning,
         )
     }
 }

@@ -102,14 +102,24 @@ impl Turn {
 impl Display for Turn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Turn::Dialogue { character, content } => {
-                write!(f, "{} says: \"{}\"", character, content)
+            Turn::Dialogue {
+                character: _,
+                content,
+            } => {
+                write!(f, "[dialogue] {}", content)
             }
             Turn::Action { description, .. } => {
-                write!(f, "{}", description)
+                write!(f, "[action] {}", description)
             }
-            Turn::Narration { content, new_character: _ } => {
-                write!(f, "{}", content)
+            Turn::Narration {
+                content,
+                new_character,
+            } => {
+                if new_character.is_some() {
+                    write!(f, "[narration_introduction] {}", content)
+                } else {
+                    write!(f, "[narration] {}", content)
+                }
             }
         }
     }
@@ -213,7 +223,11 @@ impl Scene {
     }
 
     /// Adds a narrative turn to the scene.
-    pub fn add_narration(&mut self, content: impl Display, new_character: Option<(String, CharacterData)>) -> &Turn {
+    pub fn add_narration(
+        &mut self,
+        content: impl Display,
+        new_character: Option<(String, CharacterData)>,
+    ) -> &Turn {
         let turn = Turn::Narration {
             content: content.to_string(),
             new_character,
@@ -223,7 +237,11 @@ impl Scene {
     }
 
     /// Adds a narrative turn to the scene and returns self for chaining.
-    pub fn with_narration(mut self, content: impl Display, new_character: Option<(String, CharacterData)>) -> Self {
+    pub fn with_narration(
+        mut self,
+        content: impl Display,
+        new_character: Option<(String, CharacterData)>,
+    ) -> Self {
         self.add_narration(content, new_character);
         self
     }
@@ -271,13 +289,19 @@ impl Scene {
                 self.add_narration(content, None);
             }
             "narration_introduction" => {
-                self.add_narration(content, Some((
-                    output["new_character_name"].as_str().unwrap().to_string(),
-                    CharacterData {
-                        controllable: true,
-                        role: output["new_character_description"].as_str().unwrap().to_string(),
-                    }
-                )));
+                self.add_narration(
+                    content,
+                    Some((
+                        output["new_character_name"].as_str().unwrap().to_string(),
+                        CharacterData {
+                            controllable: true,
+                            role: output["new_character_description"]
+                                .as_str()
+                                .unwrap()
+                                .to_string(),
+                        },
+                    )),
+                );
             }
             _ => {
                 unimplemented!(

@@ -26,6 +26,7 @@ impl<'a> Pipeline<'a> {
         mut output_fn: impl FnMut(&mut Inference, &JsonMap) + 'static,
         example_pairs: &[(JsonMap, JsonMap)],
         context_size: Option<usize>,
+        use_reasoning: bool,
     ) -> Self {
         // Initialize the system prompt using the provided system function
         let system_prompt = (system_fn)(PromptFormatter::new());
@@ -48,7 +49,7 @@ impl<'a> Pipeline<'a> {
             chat.supply_outputs_for_response(Some(outputs.clone()));
 
             // Infer the outputs based on the current state of the chat and the inputs
-            chat.infer_response_ext(false, |inference, _reasoning| {
+            chat.infer_response_ext(use_reasoning, |inference, _reasoning| {
                 // Call the output function to populate the outputs. We don't do anything else as this should modify the context already.
                 (output_fn)(inference, inputs);
             });
