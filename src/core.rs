@@ -327,9 +327,13 @@ If the turn is a dialogue turn, it should follow this format:
 ```json
 {\"turn_type\": \"dialogue\", \"character_name\": \"<Controllable Character>\", \"content\": \"<What They Say>\"}
 ```
-If the turn is a narration turn, it should follow this format:
+If the turn is a regular narration turn, it should follow this format:
 ```json
 {\"turn_type\": \"narration\", \"content\": \"<Narration Content>\"}
+```
+If the turn is a narration turn that introduces a new character, it should follow this format:
+```json
+{\"turn_type\": \"narration_introduction\", \"content\": \"<Narration Content>\", \"new_character\": {\"name\": \"<Character Name>\", \"role\": \"<Character Role>\"}}
 ```
 Be creative, let every character have a chance to shine, and keep the story interesting!"
             ))
@@ -382,7 +386,7 @@ Be creative, let every character have a chance to shine, and keep the story inte
                     .to_string();
 
                 // If the turn type is invalid, retry.
-                if !["action", "dialogue", "narration"].contains(&turn_type.as_str()) {
+                if !["action", "dialogue", "narration", "narration_introduction"].contains(&turn_type.as_str()) {
                     wlog!("Invalid turn type inferred: {}. Retrying...", turn_type);
                     inference.restore_checkpoint(checkpoint.clone());
                     continue;
@@ -435,6 +439,32 @@ Be creative, let every character have a chance to shine, and keep the story inte
                     continue;
                 }
 
+                // If this is a narration_introduction turn, do inference for the new character
+                if turn_type == "narration_introduction" {
+                    // Set up for inferring the new character
+                    inference.push_text(", \"new_character\": {\"name\": \"");
+
+                    // Infer the new character's name
+                    let name = inference
+                        .infer_output("new_character_name", &["\""], false)
+                        .as_str()
+                        .unwrap()
+                        .to_string();
+
+                    // Set up for inferring the new character's role
+                    inference.push_text(format!("\", \"role\": \"{} is ", name));
+
+                    // Infer the new character's role
+                    inference
+                        .infer_output("new_character_role", &["\""], false)
+                        .as_str()
+                        .unwrap()
+                        .to_string();
+
+                    // Finish the new character object
+                    inference.push_text("}");
+                }
+
                 // If we reach here, everything is valid so we can break the loop
                 break;
             }
@@ -446,7 +476,7 @@ Be creative, let every character have a chance to shine, and keep the story inte
         // Create the pipeline
         Pipeline::new(
             self,
-            0.6,
+            0.5,
             false,
             scene_writer_system,
             scene_writer_input,
@@ -478,13 +508,14 @@ Be creative, let every character have a chance to shine, and keep the story inte
                 .with_section(TextSection::new(
                     "How to Respond",
                     "You should respond with JSON representing the character following the command in the scene.\n\
+                    The content should consist of a full description of the action or dialogue.\n\
                     If the command involves the character performing an action, respond with the following JSON format:
 ```json
 {\"turn_type\": \"action\", \"content\": \"<Description of Action>\"}
 ```\n\
                     If the command involves the character speaking, respond with the following JSON format:
 ```json
-{\"turn_type\": \"dialogue\", \"content\": \"<What They Say>\"}
+{\"turn_type\": \"dialogue\", \"content\": \"<Description of Dialogue>\"}
 ```\n\
                     For example, if the command is \"Do a funny little dance in front of the goblins\" and the character is named \"Alice\", the response could be:
 ```json
@@ -538,21 +569,18 @@ Be creative, let every character have a chance to shine, and keep the story inte
                 // Set up for inferring the content
                 inference.push_text(", \"content\": \"");
 
+                // If this is a dialogue turn, start off the dialog description with the character's name.
+                if turn_type == "dialogue" {
+                    inference.push_text(&format!("{} ", character_name));
+                }
+
                 // Infer the content
                 let content = inference
-                    .infer_output("content", &["\""], false)
-                    .as_str()
-                    .unwrap()
-                    .to_string();
+                    .infer_output("content", &["\""], false);
 
-                // If this is a dialogue turn, ensure that the content doesn't start with the character's name. If it does, retry.
-                if turn_type == "dialogue" && content.starts_with(character_name) {
-                    wlog!(
-                        "Content starts with character's name: {}. Retrying...",
-                        content
-                    );
-                    inference.restore_checkpoint(checkpoint.clone());
-                    continue;
+                // If this is a dialogue turn, insert the name back into the beginning of the output.
+                if turn_type == "dialogue" {
+                    (*content) = format!("{} {}", character_name, content.as_str().unwrap()).into();
                 }
 
                 // If the turn type is valid, break out of the loop.
@@ -566,7 +594,7 @@ Be creative, let every character have a chance to shine, and keep the story inte
         // Create the pipeline
         Pipeline::new(
             self,
-            0.6,
+            0.5,
             false,
             turn_extractor_system,
             turn_extractor_input,

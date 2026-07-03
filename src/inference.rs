@@ -38,7 +38,7 @@ fn new_sampler(creativity: f32, seed: u32) -> LlamaSampler {
     let target_probability = if creativity < 0.0001 {
         -1.0
     } else {
-        1.0 - creativity * 0.55
+        1.0 - creativity * 0.5
     };
 
     // Create adaptive sampler which only samples tokens that aren't very unlikely

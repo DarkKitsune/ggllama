@@ -21,6 +21,15 @@ impl CharacterData {
     }
 }
 
+impl Default for CharacterData {
+    fn default() -> Self {
+        CharacterData {
+            controllable: true,
+            role: String::from("A character currently in the scene."),
+        }
+    }
+}
+
 /// Represents the type of travel involved in an action turn.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TravelType {
@@ -43,6 +52,7 @@ pub enum Turn {
     },
     Narration {
         content: String,
+        new_character: Option<(String, CharacterData)>,
     },
 }
 
@@ -98,7 +108,7 @@ impl Display for Turn {
             Turn::Action { description, .. } => {
                 write!(f, "{}", description)
             }
-            Turn::Narration { content } => {
+            Turn::Narration { content, new_character: _ } => {
                 write!(f, "{}", content)
             }
         }
@@ -122,6 +132,7 @@ impl Scene {
         Scene {
             turns: vec![Turn::Narration {
                 content: opening_narration.to_string(),
+                new_character: None,
             }],
             characters: characters,
         }
@@ -202,17 +213,18 @@ impl Scene {
     }
 
     /// Adds a narrative turn to the scene.
-    pub fn add_narration(&mut self, content: impl Display) -> &Turn {
+    pub fn add_narration(&mut self, content: impl Display, new_character: Option<(String, CharacterData)>) -> &Turn {
         let turn = Turn::Narration {
             content: content.to_string(),
+            new_character,
         };
         self.add_turn(turn);
         self.turns.last().unwrap()
     }
 
     /// Adds a narrative turn to the scene and returns self for chaining.
-    pub fn with_narration(mut self, content: impl Display) -> Self {
-        self.add_narration(content);
+    pub fn with_narration(mut self, content: impl Display, new_character: Option<(String, CharacterData)>) -> Self {
+        self.add_narration(content, new_character);
         self
     }
 
@@ -256,7 +268,16 @@ impl Scene {
                 self.add_action(character, content, travel);
             }
             "narration" => {
-                self.add_narration(content);
+                self.add_narration(content, None);
+            }
+            "narration_introduction" => {
+                self.add_narration(content, Some((
+                    output["new_character_name"].as_str().unwrap().to_string(),
+                    CharacterData {
+                        controllable: true,
+                        role: output["new_character_description"].as_str().unwrap().to_string(),
+                    }
+                )));
             }
             _ => {
                 unimplemented!(
