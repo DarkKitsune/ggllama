@@ -295,7 +295,7 @@ impl Scene {
                         output["new_character_name"].as_str().unwrap().to_string(),
                         CharacterData {
                             controllable: true,
-                            role: output["new_character_description"]
+                            role: output["new_character_role"]
                                 .as_str()
                                 .unwrap()
                                 .to_string(),

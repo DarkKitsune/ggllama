@@ -338,10 +338,6 @@ If the turn is a regular narration turn, it should follow this format:
 ```json
 {\"turn_type\": \"narration\", \"content\": \"<Narration Content>\"}
 ```
-If the turn is a narration turn that introduces a new character, it should follow this format:
-```json
-{\"turn_type\": \"narration_introduction\", \"content\": \"<Narration Content>\", \"new_character\": {\"name\": \"<Character Name>\", \"role\": \"<Character Role>\"}}
-```
 Be creative, let every character have a chance to shine, and keep the story interesting!"
             ))
         }
@@ -393,7 +389,7 @@ Be creative, let every character have a chance to shine, and keep the story inte
                     .to_string();
 
                 // If the turn type is invalid, retry.
-                if !["action", "dialogue", "narration", "narration_introduction"]
+                if !["action", "dialogue", "narration"]
                     .contains(&turn_type.as_str())
                 {
                     wlog!("Invalid turn type inferred: {}. Retrying...", turn_type);
@@ -447,32 +443,6 @@ Be creative, let every character have a chance to shine, and keep the story inte
                         content.as_str().unwrap()
                     )
                     .into();
-                }
-
-                // If this is a narration_introduction turn, do inference for the new character
-                if turn_type == "narration_introduction" {
-                    // Set up for inferring the new character
-                    inference.push_text(", \"new_character\": {\"name\": \"");
-
-                    // Infer the new character's name
-                    let name = inference
-                        .infer_output("new_character_name", &["\""], false)
-                        .as_str()
-                        .unwrap()
-                        .to_string();
-
-                    // Set up for inferring the new character's role
-                    inference.push_text(format!("\", \"role\": \"{} is ", name));
-
-                    // Infer the new character's role
-                    inference
-                        .infer_output("new_character_role", &["\""], false)
-                        .as_str()
-                        .unwrap()
-                        .to_string();
-
-                    // Finish the new character object
-                    inference.push_text("}");
                 }
 
                 // If we reach here, everything is valid so we can break the loop

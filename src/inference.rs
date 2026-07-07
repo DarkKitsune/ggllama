@@ -23,7 +23,7 @@ const CREATIVITY_DOWN_DIVISOR: f32 = 4.0;
 const CREATIVITY_UP_DIVISOR: f32 = 2.5;
 /// When restoring a checkpoint, creativity is temporarily raised then reduced again after this many tokens.
 /// This is to encourage creativity and avoid the model getting stuck in a loop of repeating the same output after restoring a checkpoint.
-const CHECKPOINT_RESTORE_CREATIVITY_GRACE: usize = 3;
+const CHECKPOINT_RESTORE_CREATIVITY_GRACE: usize = 5;
 
 /// Helper function to create a new sampler.
 fn new_sampler(creativity: f32, seed: u32) -> LlamaSampler {
@@ -49,15 +49,14 @@ fn new_sampler(creativity: f32, seed: u32) -> LlamaSampler {
 }
 
 /// A single inference result.
-pub struct InferenceResult<'a> {
+pub struct InferenceResult {
     pub encountered_stop_sequence: Option<String>,
     pub content: String,
     pub inference_tokens_per_second: f32,
     pub prefill_tokens_per_second: f32,
-    pub potential_checkpoint: PotentialCheckpoint<'a>,
 }
 
-impl<'a> InferenceResult<'a> {
+impl InferenceResult {
     /// Get the content with the stop sequence ommitted, if a stop sequence was encountered.
     pub fn content_without_stop_sequence(&self) -> &str {
         if let Some(stop_sequence) = &self.encountered_stop_sequence {
@@ -72,31 +71,13 @@ impl<'a> InferenceResult<'a> {
 /// A stored checkpoint of an inference job, which can be used to resume/rewind an inference job by restoring the context to the state it was in when the checkpoint was taken.
 #[derive(Debug, Clone)]
 pub struct InferenceCheckpoint {
+    pub(crate) context_state_buffer: Vec<u8>,
     pub tokens: Vec<LlamaToken>,
     pub queued_text: String,
     pub response_text: String,
     pub outputs: JsonMap,
     pub supplied_outputs: Option<JsonMap>,
     pub creativity: f32,
-}
-
-/// Allows creating a checkpoint after new logits have been added to the context.
-pub struct PotentialCheckpoint<'a> {
-    pub(crate) inference: &'a Inference<'a>,
-}
-
-impl<'a> PotentialCheckpoint<'a> {
-    /// Create a checkpoint of the current state of the inference job.
-    pub fn create_checkpoint(&self) -> InferenceCheckpoint {
-        InferenceCheckpoint {
-            tokens: self.inference.tokens.clone(),
-            queued_text: self.inference.queued_text.clone(),
-            outputs: self.inference.outputs.clone(),
-            response_text: self.inference.response_text.clone(),
-            supplied_outputs: self.inference.supplied_outputs.clone(),
-            creativity: self.inference.creativity,
-        }
-    }
 }
 
 /// Represents an inference job that is currently running, handling the context automatically and providing an API for generating tokens.
@@ -220,7 +201,12 @@ impl<'a> Inference<'a> {
         // Force unqueue into the context to ensure new logits
         //self.unqueue_to_context(true); // Part of old behavior
 
+        let context_state_length = self.context.state_get_size();
+        let mut context_state_buffer = vec![0u8; context_state_length];
+        self.context.state_get_data(&mut context_state_buffer);
+
         InferenceCheckpoint {
+            context_state_buffer,
             tokens: self.tokens.clone(),
             queued_text: self.queued_text.clone(),
             outputs: self.outputs.clone(),
@@ -271,8 +257,8 @@ impl<'a> Inference<'a> {
         // Reset the inference job, clearing the context and other internal states.
         self.reset();
 
-        // Push the checkpoint tokens into the context, which will also initialize logits for the last token.
-        self.push_tokens(&checkpoint.tokens);
+        // Restore the context state from the checkpoint's context_state_buffer.
+        self.context.state_set_data(&checkpoint.context_state_buffer);
 
         // Restore the creativity if we are lower, then give it a slight nudge towards 1.0 to ensure new results after restoring a checkpoint.
         let creativity = checkpoint.creativity.max(self.creativity);
@@ -280,6 +266,7 @@ impl<'a> Inference<'a> {
             (creativity * (CREATIVITY_UP_DIVISOR - 1.0) + 1.0) / CREATIVITY_UP_DIVISOR;
 
         // Restore remaining internal states from the checkpoint
+        self.tokens = checkpoint.tokens;
         self.queued_text = checkpoint.queued_text;
         self.outputs = checkpoint.outputs;
         self.response_text = checkpoint.response_text;
@@ -381,7 +368,7 @@ impl<'a> Inference<'a> {
     }
 
     /// Push tokens into the context. This should not be used during a message response unless you know what you are doing.
-    pub(crate) fn push_tokens(&mut self, tokens: &[LlamaToken]) -> PotentialCheckpoint<'_> {
+    pub(crate) fn push_tokens(&mut self, tokens: &[LlamaToken]) {
         // We need to properly handle queued text before decoding tokens into the context so...
         // If we have queued text, push it to the context before generating.
         if !self.queued_text.is_empty() {
@@ -400,9 +387,6 @@ impl<'a> Inference<'a> {
             }
             self.context.decode(&mut self.batch).unwrap();
         }
-
-        // Return a potential checkpoint that can be used to create a checkpoint here
-        PotentialCheckpoint { inference: self }
     }
 
     /// Queue messages to be added to the context, then begin the assistant response to said messages.
@@ -454,11 +438,11 @@ impl<'a> Inference<'a> {
     /// If this is an assistant message, then use `start_response_to_messages` to push the user and system messages first, then call this method.
     /// If `stop_sequences` is provided, generation will stop as soon as any of the sequences are generated.
     /// The encountered stop sequence will be included in the output, as well as remaining in the internal context.
-    pub fn infer<'b>(
-        &'b mut self,
+    pub fn infer(
+        &mut self,
         max_tokens: Option<usize>,
         stop_sequences: &[&str],
-    ) -> InferenceResult<'b> {
+    ) -> InferenceResult {
         // If we have queued text, push it to the context before generating.
         // Also measure this as prefill timing
         let prefill_start_time = std::time::Instant::now();
@@ -576,7 +560,6 @@ impl<'a> Inference<'a> {
             prefill_tokens_per_second,
             inference_tokens_per_second,
             encountered_stop_sequence,
-            potential_checkpoint: PotentialCheckpoint { inference: self },
         }
     }
 
