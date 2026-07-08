@@ -8,11 +8,7 @@ use anyhow::Result;
 use serde_json::Map;
 
 use crate::{
-    chat::{Chat, ChatCheckpoint, ChatRole},
-    core::Core,
-    dlog, map,
-    prompt_formatter::{PromptFormatter, TextSection},
-    wlog,
+    chat::{Chat, ChatCheckpoint, ChatRole, DEFAULT_CONTEXT_SIZE_LIMIT}, core::Core, dlog, map, prompt_formatter::{PromptFormatter, TextSection}, wlog,
 };
 
 /// A capability that an agent can have, which can be used to determine what the agent is allowed to do.
@@ -403,7 +399,7 @@ impl<'a> Agent<'a> {
         dlog!("System Prompt:\n{}", system_prompt);
 
         // Start the chat with the system prompt
-        let mut chat = Chat::new(core, system_prompt, 0.5, None);
+        let mut chat = Chat::new(core, system_prompt, 0.35, None).with_context_size_limit(DEFAULT_CONTEXT_SIZE_LIMIT * 2);
 
         let checkpoint = chat.create_checkpoint();
 

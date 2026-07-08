@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use anyhow::anyhow;
 use ggllama::{
-    agent::{Agent, BasicEnvironment, Function, FunctionParameter, FunctionResult, ParameterType},
+    agent::{Agent, BasicEnvironment, Function, FunctionParameter, ParameterType},
     core::{CompressionLevel, Core},
     dlog, map,
 };
