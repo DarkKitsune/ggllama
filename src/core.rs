@@ -45,7 +45,7 @@ impl Core {
         context_compression: CompressionLevel,
         use_gemma_format: bool,
     ) -> Self {
-        let params = LlamaModelParams::default().with_n_gpu_layers(99);
+        let params = LlamaModelParams::default().with_n_gpu_layers(200);
         let model = LlamaModel::load_from_file(&BACKEND, model_path, &params).unwrap();
 
         Self {

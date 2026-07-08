@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use anyhow::anyhow;
 use ggllama::{
     agent::{Agent, BasicEnvironment, Function, FunctionParameter, FunctionResult, ParameterType},
     core::{CompressionLevel, Core},
@@ -9,7 +10,7 @@ use ggllama::{
 fn main() {
     // Initialize the core with the model and some KV cache quantization/compression
     let core = Core::from_model(
-        "models/Qwythos-9B-Claude-Mythos-5-1M-uncensored-heretic-Q6_K.gguf",
+        "models/Ornith-1.0-9B-abliterated-dpo-Q5_K_L-imat-GGUF.gguf",
         CompressionLevel::Medium,
         false,
     );
@@ -27,7 +28,8 @@ fn main() {
             vec![],
             |env: &mut BasicEnvironment<HashMap<String, String>>, _args| {
                 let file_names: Vec<String> = env.data().keys().cloned().collect();
-                FunctionResult::Ok(map! { "files" => file_names })
+
+                Ok(map! { "files" => file_names })
             },
         ),
         // Function to read the contents of a file by its name
@@ -37,20 +39,16 @@ fn main() {
             vec![FunctionParameter::new("file_name", ParameterType::String)],
             vec![],
             |env: &mut BasicEnvironment<HashMap<String, String>>, args| {
-                if let Some(file_name) = args.get("file_name") {
-                    if let Some(file_name) = file_name.as_str() {
-                        if let Some(content) = env.data().get(file_name) {
-                            FunctionResult::Ok(map! { "content" => content.clone() })
-                        } else {
-                            FunctionResult::Err(format!("File '{}' not found", file_name))
-                        }
-                    } else {
-                        FunctionResult::Err(
-                            "Invalid 'file_name' argument: must be a string".to_string(),
-                        )
-                    }
+                let file_name = args
+                    .get("file_name")
+                    .ok_or(anyhow!("Missing 'file_name' argument"))?
+                    .as_str()
+                    .ok_or(anyhow!("Invalid 'file_name' argument: must be a string"))?;
+
+                if let Some(content) = env.data().get(file_name) {
+                    Ok(map! { "content" => content.clone() })
                 } else {
-                    FunctionResult::Err("Missing 'file_name' argument".to_string())
+                    Err(anyhow!("File '{}' not found", file_name))
                 }
             },
         ),
@@ -64,29 +62,22 @@ fn main() {
             ],
             vec![],
             |env: &mut BasicEnvironment<HashMap<String, String>>, args| {
-                if let Some(file_name) = args.get("file_name") {
-                    if let Some(file_name) = file_name.as_str() {
-                        if let Some(content) = args.get("content") {
-                            if let Some(content) = content.as_str() {
-                                env.data_mut()
-                                    .insert(file_name.to_string(), content.to_string());
-                                FunctionResult::Ok(map! { "status" => "success" })
-                            } else {
-                                FunctionResult::Err(
-                                    "Invalid 'content' argument: must be a string".to_string(),
-                                )
-                            }
-                        } else {
-                            FunctionResult::Err("Missing 'content' argument".to_string())
-                        }
-                    } else {
-                        FunctionResult::Err(
-                            "Invalid 'file_name' argument: must be a string".to_string(),
-                        )
-                    }
-                } else {
-                    FunctionResult::Err("Missing 'file_name' argument".to_string())
-                }
+                let file_name = args
+                    .get("file_name")
+                    .ok_or(anyhow!("Missing 'file_name' argument"))?
+                    .as_str()
+                    .ok_or(anyhow!("Invalid 'file_name' argument: must be a string"))?;
+
+                let content = args
+                    .get("content")
+                    .ok_or(anyhow!("Missing 'content' argument"))?
+                    .as_str()
+                    .ok_or(anyhow!("Invalid 'content' argument: must be a string"))?;
+
+                env.data_mut()
+                    .insert(file_name.to_string(), content.to_string());
+
+                Ok(map! { "status" => "success" })
             },
         ),
     ];
@@ -130,17 +121,17 @@ fn main() {
 
     dlog!(!"Finished editing!\nResult:\n{}", result);
 
-    // First clear the output directory to ensure no old files remain
-    if std::path::Path::new("output").exists() {
-        std::fs::remove_dir_all("output").unwrap();
+    // First clear the environment directory to ensure no old files remain
+    if std::path::Path::new("environment").exists() {
+        std::fs::remove_dir_all("environment").unwrap();
     }
 
-    // For each file in the virtual file system, save its contents to output/<file_name>
+    // For each file in the virtual file system, save its contents to environment/<file_name>
     for (file_name, content) in environment.data() {
-        let output_path = format!("output/{}", file_name);
-        if let Some(parent) = std::path::Path::new(&output_path).parent() {
+        let environment_path = format!("environment/{}", file_name);
+        if let Some(parent) = std::path::Path::new(&environment_path).parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
-        std::fs::write(output_path, content).unwrap();
+        std::fs::write(environment_path, content).unwrap();
     }
 }

@@ -97,9 +97,36 @@ impl From<Result<Map<String, serde_json::Value>, String>> for FunctionResult {
     }
 }
 
+impl Into<Result<Map<String, serde_json::Value>, String>> for FunctionResult {
+    fn into(self) -> Result<Map<String, serde_json::Value>, String> {
+        match self {
+            FunctionResult::Ok(value) => Ok(value),
+            FunctionResult::Err(message) => Err(message),
+        }
+    }
+}
+
 impl From<Map<String, serde_json::Value>> for FunctionResult {
     fn from(value: Map<String, serde_json::Value>) -> Self {
         Self::Ok(value)
+    }
+}
+
+impl From<Result<Map<String, serde_json::Value>, anyhow::Error>> for FunctionResult {
+    fn from(result: Result<Map<String, serde_json::Value>, anyhow::Error>) -> Self {
+        match result {
+            Ok(value) => Self::Ok(value),
+            Err(message) => Self::Err(message.to_string()),
+        }
+    }
+}
+
+impl Into<Result<Map<String, serde_json::Value>, anyhow::Error>> for FunctionResult {
+    fn into(self) -> Result<Map<String, serde_json::Value>, anyhow::Error> {
+        match self {
+            FunctionResult::Ok(value) => Ok(value),
+            FunctionResult::Err(message) => Err(anyhow::anyhow!(message)),
+        }
     }
 }
 
@@ -114,8 +141,15 @@ pub struct Function<E: Environment> {
     /// A list of required agent capabilities who can call this function. If the agent does not have any of the required capabilities, it should not be able to call this function.
     pub required_capabilities: Vec<Capability>,
     /// The function body, which is a closure that takes a map of arguments and returns a JSON value. This is the actual implementation of the function that will be executed when the agent calls it.
-    pub body:
-        Rc<RefCell<dyn FnMut(&mut E, &Map<String, serde_json::Value>) -> FunctionResult + 'static>>,
+    pub body: Rc<
+        RefCell<
+            dyn FnMut(
+                    &mut E,
+                    &Map<String, serde_json::Value>,
+                ) -> Result<Map<String, serde_json::Value>, anyhow::Error>
+                + 'static,
+        >,
+    >,
 }
 
 impl<E: Environment> Function<E> {
@@ -125,7 +159,11 @@ impl<E: Environment> Function<E> {
         description: impl Display,
         parameters: Vec<FunctionParameter>,
         required_capabilities: Vec<Capability>,
-        body: impl FnMut(&mut E, &Map<String, serde_json::Value>) -> FunctionResult + 'static,
+        body: impl FnMut(
+            &mut E,
+            &Map<String, serde_json::Value>,
+        ) -> Result<Map<String, serde_json::Value>, anyhow::Error>
+        + 'static,
     ) -> Self {
         Self {
             name: name.to_string(),
@@ -237,7 +275,7 @@ pub trait Environment: Sized {
     /// Gets all functions that are available in this environment, regardless of the agent's capabilities.
     fn available_functions(&self) -> Vec<Function<Self>>;
 
-    /// Describes the environment to the agent.
+    /// Describes the environment as if speaking to the agent. For example, "The project folder of my top-down shooter game."
     fn environment_prompt(&self) -> String;
 
     /// Gets the functions which an agent with the given capabilities is allowed to execute in this environment.
@@ -265,7 +303,7 @@ pub trait Environment: Sized {
                 param_type: ParameterType::String,
             }],
             vec![],
-            |_env: &mut Self, _args: &Map<String, serde_json::Value>| FunctionResult::ok(),
+            |_env: &mut Self, _args: &Map<String, serde_json::Value>| Ok(Map::new()),
         ));
 
         functions
@@ -292,7 +330,7 @@ pub trait Environment: Sized {
             }
 
             // Execute the function body
-            Ok((func.body.clone()).borrow_mut()(self, args))
+            Ok((func.body.clone()).borrow_mut()(self, args).into())
         } else {
             Err(anyhow::anyhow!(
                 "Function '{}' is not allowed for the agent's capabilities.",
@@ -365,7 +403,7 @@ impl<'a> Agent<'a> {
         dlog!("System Prompt:\n{}", system_prompt);
 
         // Start the chat with the system prompt
-        let mut chat = Chat::new(core, system_prompt, 0.2, None);
+        let mut chat = Chat::new(core, system_prompt, 0.5, None);
 
         let checkpoint = chat.create_checkpoint();
 
@@ -477,7 +515,9 @@ impl<'a> Agent<'a> {
                 // Construct a function response from the result
                 let response_string = match result {
                     FunctionResult::Ok(value) => serde_json::to_string_pretty(&value).unwrap(),
-                    FunctionResult::Err(err) => err,
+                    FunctionResult::Err(err) => {
+                        serde_json::to_string_pretty(&map! { "error" => err }).unwrap()
+                    }
                 };
 
                 self.chat.push_message(ChatRole::Function, response_string);
