@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
 use ggllama::{
-    agent::{Agent, BasicEnvironment, Function, FunctionParameter, FunctionResult, ParameterType}, core::{CompressionLevel, Core}, dlog, map,
+    agent::{Agent, BasicEnvironment, Function, FunctionParameter, FunctionResult, ParameterType},
+    core::{CompressionLevel, Core},
+    dlog, map,
 };
 
 fn main() {
@@ -26,16 +28,13 @@ fn main() {
             |env: &mut BasicEnvironment<HashMap<String, String>>, _args| {
                 let file_names: Vec<String> = env.data().keys().cloned().collect();
                 FunctionResult::Ok(map! { "files" => file_names })
-            }
+            },
         ),
-
         // Function to read the contents of a file by its name
         Function::new(
             "read_file",
             "Reads the contents of the file with the given name",
-            vec![
-                FunctionParameter::new("file_name", ParameterType::String),
-            ],
+            vec![FunctionParameter::new("file_name", ParameterType::String)],
             vec![],
             |env: &mut BasicEnvironment<HashMap<String, String>>, args| {
                 if let Some(file_name) = args.get("file_name") {
@@ -46,14 +45,15 @@ fn main() {
                             FunctionResult::Err(format!("File '{}' not found", file_name))
                         }
                     } else {
-                        FunctionResult::Err("Invalid 'file_name' argument: must be a string".to_string())
+                        FunctionResult::Err(
+                            "Invalid 'file_name' argument: must be a string".to_string(),
+                        )
                     }
                 } else {
                     FunctionResult::Err("Missing 'file_name' argument".to_string())
                 }
-            }
+            },
         ),
-
         // Function to write contents to a file by its name
         Function::new(
             "write_file",
@@ -68,21 +68,26 @@ fn main() {
                     if let Some(file_name) = file_name.as_str() {
                         if let Some(content) = args.get("content") {
                             if let Some(content) = content.as_str() {
-                                env.data_mut().insert(file_name.to_string(), content.to_string());
+                                env.data_mut()
+                                    .insert(file_name.to_string(), content.to_string());
                                 FunctionResult::Ok(map! { "status" => "success" })
                             } else {
-                                FunctionResult::Err("Invalid 'content' argument: must be a string".to_string())
+                                FunctionResult::Err(
+                                    "Invalid 'content' argument: must be a string".to_string(),
+                                )
                             }
                         } else {
                             FunctionResult::Err("Missing 'content' argument".to_string())
                         }
                     } else {
-                        FunctionResult::Err("Invalid 'file_name' argument: must be a string".to_string())
+                        FunctionResult::Err(
+                            "Invalid 'file_name' argument: must be a string".to_string(),
+                        )
                     }
                 } else {
                     FunctionResult::Err("Missing 'file_name' argument".to_string())
                 }
-            }
+            },
         ),
     ];
 
@@ -93,15 +98,43 @@ fn main() {
         functions,
     );
 
-    // Create the agent and have them interact with the environment
+    // Create the agent
     let mut agent = Agent::new(&core, vec![]);
-    let result = agent.run(&mut environment, true, "Create a basic Python game with a ball bouncing around the screen at 60 FPS. Every bounce the ball should cycle color.");
+
+    // Have them write the game
+    let result = agent.run(
+        &mut environment,
+        true,
+        "Create a basic Python game with a ball bouncing around the screen at 60 FPS. \
+        The ball should change color every time it bounces off the walls. \
+        Comment your code appropriately.",
+    );
+
+    dlog!(!"Finished initial writing!\nResult:\n{}", result);
+
+    // Have them then make an edit to the game
+    let result = agent.run(
+        &mut environment,
+        true,
+        "Please edit my bouncing ball python game so that there's a particle effect whenever the ball bounces off a wall."
+    );
+
+    dlog!(!"Finished editing!\nResult:\n{}", result);
+
+    // Have them fix & refactor the game
+    let result = agent.run(
+        &mut environment,
+        true,
+        "Please fix and refactor the Python code for my bouncing ball game. Make sure there are no syntax errors."
+    );
+
+    dlog!(!"Finished editing!\nResult:\n{}", result);
 
     // First clear the output directory to ensure no old files remain
     if std::path::Path::new("output").exists() {
         std::fs::remove_dir_all("output").unwrap();
     }
-    
+
     // For each file in the virtual file system, save its contents to output/<file_name>
     for (file_name, content) in environment.data() {
         let output_path = format!("output/{}", file_name);
@@ -110,6 +143,4 @@ fn main() {
         }
         std::fs::write(output_path, content).unwrap();
     }
-
-    dlog!("Finished running!\nResult:\n{}", result);
 }

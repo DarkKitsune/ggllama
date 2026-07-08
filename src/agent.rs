@@ -8,7 +8,7 @@ use anyhow::Result;
 use serde_json::Map;
 
 use crate::{
-    chat::{Chat, ChatRole},
+    chat::{Chat, ChatCheckpoint, ChatRole},
     core::Core,
     dlog, map,
     prompt_formatter::{PromptFormatter, TextSection},
@@ -344,6 +344,7 @@ impl<T> Environment for BasicEnvironment<T> {
 /// The agent can be configured with an environment, a set of capabilities which define its capabilities, and a task.
 pub struct Agent<'a> {
     chat: Chat<'a>,
+    checkpoint: ChatCheckpoint,
     capabilities: Vec<Capability>,
 }
 
@@ -364,9 +365,15 @@ impl<'a> Agent<'a> {
         dlog!("System Prompt:\n{}", system_prompt);
 
         // Start the chat with the system prompt
-        let chat = Chat::new(core, system_prompt, 0.2, None);
+        let mut chat = Chat::new(core, system_prompt, 0.2, None);
 
-        Self { chat, capabilities }
+        let checkpoint = chat.create_checkpoint();
+
+        Self {
+            chat,
+            checkpoint,
+            capabilities,
+        }
     }
 
     /// Gives the agent a task and informs it of the available functions, then runs the agent until it has completed its task or reached a stopping condition.
@@ -476,6 +483,9 @@ impl<'a> Agent<'a> {
                 self.chat.push_message(ChatRole::Function, response_string);
             }
         };
+
+        // Reset the chat to before this run
+        self.chat.restore_checkpoint(self.checkpoint.clone());
 
         task_result.unwrap()
     }

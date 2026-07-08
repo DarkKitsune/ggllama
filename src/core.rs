@@ -389,9 +389,7 @@ Be creative, let every character have a chance to shine, and keep the story inte
                     .to_string();
 
                 // If the turn type is invalid, retry.
-                if !["action", "dialogue", "narration"]
-                    .contains(&turn_type.as_str())
-                {
+                if !["action", "dialogue", "narration"].contains(&turn_type.as_str()) {
                     wlog!("Invalid turn type inferred: {}. Retrying...", turn_type);
                     inference.restore_checkpoint(checkpoint.clone());
                     continue;

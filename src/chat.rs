@@ -3,7 +3,12 @@ use std::fmt::{Debug, Display};
 use serde_json::Map;
 
 use crate::{
-    core::Core, dlog, inference::{Inference, InferenceCheckpoint}, map, util::{JsonMap, JsonValue}, wlog,
+    core::Core,
+    dlog,
+    inference::{Inference, InferenceCheckpoint},
+    map,
+    util::JsonMap,
+    wlog,
 };
 
 /// The chat compacts its own context if it exceeds this many tokens
@@ -216,8 +221,15 @@ impl<'a> Chat<'a> {
 
                 // Parse the function calls from the response, until no more are found
                 let mut function_call = None;
-                if let Some(parse_begin) = content.find("<function_call>")
-                    && let Some(parse_end) = content.find("</function_call>")
+                if let Some(parse_begin) = content.rfind("<function_call>")
+                    && let Some(parse_end) = content.rfind("</function_call>").or_else(|| {
+                        // If content ends with } then assume the function call JSON might be complete and use the end of the content as the parse_end
+                        if content.ends_with('}') {
+                            Some(content.len())
+                        } else {
+                            None
+                        }
+                    })
                 {
                     // Get just the text between the tags
                     let function_call_str =
@@ -259,7 +271,16 @@ impl<'a> Chat<'a> {
                     dlog!(!"Function call JSON:\n{:#?}", function_call_json);
 
                     // Remove the range from the content
-                    content.replace_range(parse_begin..(parse_end + "</function_call>".len()), "");
+                    content.replace_range(
+                        parse_begin
+                            ..(parse_end
+                                + if content.contains("</function_call>") {
+                                    "</function_call>".len()
+                                } else {
+                                    0
+                                }),
+                        "",
+                    );
                     content = content.trim().to_string();
                 }
 

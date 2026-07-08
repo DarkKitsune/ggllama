@@ -258,7 +258,8 @@ impl<'a> Inference<'a> {
         self.reset();
 
         // Restore the context state from the checkpoint's context_state_buffer.
-        self.context.state_set_data(&checkpoint.context_state_buffer);
+        self.context
+            .state_set_data(&checkpoint.context_state_buffer);
 
         // Restore the creativity if we are lower, then give it a slight nudge towards 1.0 to ensure new results after restoring a checkpoint.
         let creativity = checkpoint.creativity.max(self.creativity);
@@ -438,11 +439,7 @@ impl<'a> Inference<'a> {
     /// If this is an assistant message, then use `start_response_to_messages` to push the user and system messages first, then call this method.
     /// If `stop_sequences` is provided, generation will stop as soon as any of the sequences are generated.
     /// The encountered stop sequence will be included in the output, as well as remaining in the internal context.
-    pub fn infer(
-        &mut self,
-        max_tokens: Option<usize>,
-        stop_sequences: &[&str],
-    ) -> InferenceResult {
+    pub fn infer(&mut self, max_tokens: Option<usize>, stop_sequences: &[&str]) -> InferenceResult {
         // If we have queued text, push it to the context before generating.
         // Also measure this as prefill timing
         let prefill_start_time = std::time::Instant::now();
