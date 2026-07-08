@@ -394,7 +394,7 @@ impl<'a> Agent<'a> {
                 format!(
                     "You may call *one* function per response. If you need to call a function to complete the task, you should *only* respond with the function name and the arguments in JSON format, \
                     between <function_call> and </function_call> tags. All parameters should be provided as matching arguments. For example:\n\
-                    ```\n\
+                    ```
 <function_call>
 {{
     \"name\": \"function_name_here\",
@@ -429,7 +429,10 @@ impl<'a> Agent<'a> {
 
             // Log the agent's response for debugging purposes
             if let Some(function_call) = response.function_call.as_ref() {
-                dlog!("Function call:\n{:#?}", function_call);
+                // Don't log if it is an "exit" function call, as it is expected to be called when the agent finishes its task
+                if function_call.name != "exit" {
+                    dlog!("Function call:\n{:#?}", function_call);
+                }
             } else {
                 dlog!(!"Response:\n{:#?}", response);
             }

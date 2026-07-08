@@ -3,10 +3,7 @@ use std::fmt::{Debug, Display};
 use serde_json::Map;
 
 use crate::{
-    core::Core,
-    inference::{Inference, InferenceCheckpoint},
-    map,
-    util::JsonMap,
+    core::Core, dlog, inference::{Inference, InferenceCheckpoint}, map, util::{JsonMap, JsonValue}, wlog,
 };
 
 /// The chat compacts its own context if it exceeds this many tokens
@@ -208,43 +205,66 @@ impl<'a> Chat<'a> {
                 inference.push_text(prefix);
             }
 
-            // Infer the response until one of the stop sequences is encountered
-            let response = inference.infer(max_tokens, stop_sequences);
+            // Use checkpointing and a loop to validate responses and regenerate if necessary
+            let checkpoint = inference.create_checkpoint();
+            let (response, content, function_call) = loop {
+                // Infer the response until one of the stop sequences is encountered
+                let response = inference.infer(max_tokens, stop_sequences);
 
-            // Trim the response content
-            let mut content = response.content_without_stop_sequence().trim().to_string();
+                // Trim the response content
+                let mut content = response.content_without_stop_sequence().trim().to_string();
 
-            // Parse the function calls from the response, until no more are found
-            let mut function_call = None;
-            if let Some(parse_begin) = content.find("<function_call>")
-                && let Some(parse_end) = content.find("</function_call>")
-            {
-                // Get just the text between the tags
-                let function_call_str =
-                    &content[(parse_begin + "<function_call>".len())..parse_end];
+                // Parse the function calls from the response, until no more are found
+                let mut function_call = None;
+                if let Some(parse_begin) = content.find("<function_call>")
+                    && let Some(parse_end) = content.find("</function_call>")
+                {
+                    // Get just the text between the tags
+                    let function_call_str =
+                        &content[(parse_begin + "<function_call>".len())..parse_end];
 
-                // Parse the function call JSON
-                let function_call_json: Map<String, serde_json::Value> =
-                    serde_json::from_str(function_call_str).unwrap_or_default();
+                    // Parse the function call JSON
+                    let mut function_call_json: Result<Map<_, _>, _> =
+                        serde_json::from_str(function_call_str);
 
-                // Construct the FunctionCall struct from the parsed JSON
-                function_call = Some(FunctionCall {
-                    name: function_call_json
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                    arguments: function_call_json
-                        .get("arguments")
-                        .and_then(|v| v.as_object())
-                        .cloned()
-                        .unwrap_or_default(),
-                });
+                    // If the JSON fails to parse, add a } and try to parse again
+                    if function_call_json.is_err() {
+                        let mut function_call_str_fixed = function_call_str.to_string();
+                        function_call_str_fixed.push('}');
+                        function_call_json = serde_json::from_str(&function_call_str_fixed);
+                    }
 
-                // Remove the range from the content
-                content.replace_range(parse_begin..(parse_end + "</function_call>".len()), "");
-                content = content.trim().to_string();
-            }
+                    // If the JSON still fails to parse, log a warning, restore the checkpoint, and continue the loop
+                    if function_call_json.is_err() {
+                        wlog!("Failed to parse function call JSON:\n{}", function_call_str);
+                        inference.restore_checkpoint(checkpoint.clone());
+                        continue;
+                    }
+                    let function_call_json = function_call_json.unwrap();
+
+                    // Construct the FunctionCall struct from the parsed JSON
+                    function_call = Some(FunctionCall {
+                        name: function_call_json
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        arguments: function_call_json
+                            .get("arguments")
+                            .and_then(|v| v.as_object())
+                            .cloned()
+                            .unwrap_or_default(),
+                    });
+
+                    dlog!(!"Function call JSON:\n{:#?}", function_call_json);
+
+                    // Remove the range from the content
+                    content.replace_range(parse_begin..(parse_end + "</function_call>".len()), "");
+                    content = content.trim().to_string();
+                }
+
+                break (response, content, function_call);
+            };
 
             ChatResponse {
                 content,
