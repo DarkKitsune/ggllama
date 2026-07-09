@@ -11,6 +11,17 @@ use crate::{
     util::JsonMap,
 };
 
+/// The state of a single task in a `DirectoryEnvironment`'s to-do list.
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+pub enum TaskState {
+    /// The task is not yet completed.
+    Unfinished,
+    /// Agent has marked the task as completed, but it has not yet been verified by a human.
+    NeedsReview,
+    /// The task has been completed and verified.
+    Finished,
+}
+
 /// Wraps a directory in the file system as an environment for the agent, allowing it to interact with the files within the directory.
 /// Files outside the directory are not accessible through this environment.
 pub struct DirectoryEnvironment {
@@ -41,8 +52,8 @@ impl DirectoryEnvironment {
         &self.modified_files
     }
 
-    /// Lists the files in the directory pointed to by the given path within the directory wrapped by this environment.
-    pub fn list_files(&self, dir_path: impl AsRef<Path>) -> Vec<String> {
+    /// Gets the files in the directory pointed to by the given path within the directory wrapped by this environment.
+    pub fn get_files(&self, dir_path: impl AsRef<Path>, recursive: bool) -> Vec<PathBuf> {
         // Join the directory path with the base path and then get the absolute path
         let full_path = self.path.join(&dir_path);
         let full_path = absolute(&full_path)
@@ -56,12 +67,32 @@ impl DirectoryEnvironment {
             );
         }
 
-        // Read the directory and collect the file names into a vector
-        std::fs::read_dir(&full_path)
-            .unwrap_or_else(|_| panic!("Failed to read directory: {}", full_path.display()))
-            .filter_map(|entry| entry.ok())
-            .map(|entry| entry.file_name().into_string().unwrap_or_default())
-            .collect()
+        // Recursively get files in the directory
+        let mut files = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(full_path) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+
+                // Skip the protected environment.json file
+                if path.file_name().map(|n| n.to_string_lossy()) == Some("environment.json".into()) {
+                    continue;
+                }
+
+                if path.is_file() {
+                    files.push(path.strip_prefix(&self.path).unwrap().to_path_buf());
+                } else if recursive && path.is_dir() {
+                    let relative_path = path.strip_prefix(&self.path).unwrap();
+                    files.extend(self.get_files(relative_path, true));
+                }
+            }
+        }
+
+        files
+    }
+
+    /// Gets all files in the root of the directory wrapped by this environment.
+    pub fn get_all_files(&self) -> Vec<PathBuf> {
+        self.get_files(".", true)
     }
 
     /// Reads the contents of a file in the directory wrapped by this environment.
@@ -75,6 +106,14 @@ impl DirectoryEnvironment {
         if !full_path.starts_with(&self.path) {
             return Err(anyhow::anyhow!(
                 "Attempted to read a file outside the directory: {}",
+                full_path.display()
+            ));
+        }
+
+        // Ensure that the file is not environment.json, which is protected
+        if full_path.file_name().map(|n| n.to_string_lossy()) == Some("environment.json".into()) {
+            return Err(anyhow::anyhow!(
+                "Attempted to read a protected environment file: {}",
                 full_path.display()
             ));
         }
@@ -99,6 +138,14 @@ impl DirectoryEnvironment {
         if !full_path.starts_with(&self.path) {
             return Err(anyhow::anyhow!(
                 "Attempted to write a file outside the directory: {}",
+                full_path.display()
+            ));
+        }
+
+        // Ensure that the file is not environment.json, which is protected
+        if full_path.file_name().map(|n| n.to_string_lossy()) == Some("environment.json".into()) {
+            return Err(anyhow::anyhow!(
+                "Attempted to write to a protected environment file: {}",
                 full_path.display()
             ));
         }
@@ -128,23 +175,16 @@ impl Environment for DirectoryEnvironment {
 
     fn available_functions(&self) -> Vec<Function<Self>> {
         vec![
-            // Function to list files in a given relative path within the environment directory.
+            // Function to get files in a given relative path within the environment directory.
             Function::new(
-                "list_files",
-                "Lists the files in a given relative path within the environment directory. Use \".\" for the root of the environment directory.",
-                vec![FunctionParameter::new(
-                    "relative_path",
-                    ParameterType::String,
-                )],
+                "get_files",
+                "Gets all files in the environment directory and all of its subdirectories, recursively. \
+                Returns a list of file paths relative to the environment directory.",
                 vec![],
-                |env: &mut DirectoryEnvironment, args: &JsonMap| {
-                    let directory = args
-                        .get("relative_path")
-                        .ok_or(anyhow::anyhow!("Missing argument: relative_path"))?
-                        .as_str()
-                        .ok_or(anyhow::anyhow!("Argument 'relative_path' is not a string"))?;
+                vec![],
+                |env: &mut DirectoryEnvironment, _args: &JsonMap| {
                     Ok(map! {
-                        "files" => env.list_files(directory)
+                        "files" => env.get_all_files()
                     })
                 },
             ),
@@ -189,7 +229,9 @@ impl Environment for DirectoryEnvironment {
                         .as_str()
                         .ok_or(anyhow::anyhow!("Argument 'contents' is not a string"))?;
                     env.write_file(file_path, contents)?;
-                    Ok(map! {})
+                    Ok(map! {
+                        "status" => "success"
+                    })
                 },
             ),
         ]

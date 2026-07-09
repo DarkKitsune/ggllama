@@ -46,7 +46,7 @@ pub enum ChatRole {
 }
 
 /// Represents a call to a function, usually emitted by the assistant in a chat.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct FunctionCall {
     /// The name of the function being called.
     pub name: String,
@@ -239,16 +239,25 @@ impl<'a> Chat<'a> {
                     let mut function_call_json: Result<Map<_, _>, _> =
                         serde_json::from_str(function_call_str);
 
-                    // If the JSON fails to parse, add a } and try to parse again
+                    // If the JSON fails to parse, add a } and try to parse again (in case there is a missing brace at the end)
                     if function_call_json.is_err() {
                         let mut function_call_str_fixed = function_call_str.to_string();
                         function_call_str_fixed.push('}');
                         function_call_json = serde_json::from_str(&function_call_str_fixed);
+
+                        // If it still fails, trim and check if it ends with a }, and if so then remove it and try again (in case there were too many braces)
+                        if function_call_json.is_err() {
+                            let mut function_call_str_fixed = function_call_str.trim().to_string();
+                            if function_call_str_fixed.ends_with('}') {
+                                function_call_str_fixed.pop();
+                            }
+                            function_call_json = serde_json::from_str(&function_call_str_fixed);
+                        }
                     }
 
                     // If the JSON still fails to parse, log a warning, restore the checkpoint, and continue the loop
-                    if function_call_json.is_err() {
-                        wlog!("Failed to parse function call JSON:\n{}", function_call_str);
+                    if let Err(e) = &function_call_json {
+                        wlog!("Failed to parse function call JSON:\n{}\n\nError:\n{}", function_call_str, e);
                         inference.restore_checkpoint(checkpoint.clone());
                         continue;
                     }

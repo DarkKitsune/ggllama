@@ -135,6 +135,8 @@ impl PromptSection for TextSection {
 
     fn render(&self, data: &JsonMap) -> String {
         substitute_placeholders(&self.content, data)
+                // Replace multiple consecutive newlines with a single newline to avoid breaking formatting
+                .replace("\n\n", "\n")
     }
 
     fn boxed_clone(&self) -> Box<dyn PromptSection> {

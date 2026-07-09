@@ -67,12 +67,12 @@ impl Core {
             .with_flash_attention(true)
             .with_n_ctx(None)
             .with_cache_type_k(match self.compression {
-                CompressionLevel::High => GgmlType::Q4_0,
+                CompressionLevel::High => GgmlType::Q5_0,
                 CompressionLevel::Medium => GgmlType::Q8_0,
                 CompressionLevel::None => GgmlType::F16,
             })
             .with_cache_type_v(match self.compression {
-                CompressionLevel::High => GgmlType::Q4_0,
+                CompressionLevel::High => GgmlType::Q8_0,
                 CompressionLevel::Medium => GgmlType::Q8_0,
                 CompressionLevel::None => GgmlType::F16,
             });

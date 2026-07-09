@@ -242,14 +242,6 @@ impl<E: Environment> Function<E> {
             }
         }
 
-        // Also fail if an argument doesn't exist in the function's parameters, to keep the chat context clean
-        for key in args.keys() {
-            if !self.parameters.iter().any(|p| &p.name == key) {
-                wlog!("Unexpected argument: {}", key);
-                return false;
-            }
-        }
-
         true
     }
 }
@@ -329,7 +321,7 @@ pub trait Environment: Sized {
             Ok((func.body.clone()).borrow_mut()(self, args).into())
         } else {
             Err(anyhow::anyhow!(
-                "Function '{}' is not allowed for the agent's capabilities.",
+                "Function '{}' is not valid or does not exist.",
                 name
             ))
         }
@@ -390,16 +382,23 @@ impl<'a> Agent<'a> {
             // Describe the agent's role
             .with_section(TextSection::new(
                 "Your Role",
-                "You are an agent in an enclosed environment. The user will give you a task labeled \"Task\". \
-                You should use your own reasoning and the functions available to you in \"Functions\" to complete the task. \
-                You may not ask the user for more information, nor ask the user to perform any actions for you.",
+                "You are an expert agent who is knowledgeable in many areas including programming, writing, and math.\n\
+                The user will give you a task labeled \"Task\" which you should complete by using the available functions in \
+                \"Functions\" to interact with the \"Environment\". You may call one function per response to assist with completing the task.\n\
+                Once you have completed the task, you should call the \"exit\" function with a very short and concise summary of what you did to complete \
+                the task, including changes to the environment. If you are unable to complete the task with the available functions, \
+                you should call the \"exit\" function and explain why you were unable to complete the task.\n\
+                A function may return an error in a JSON field called \"error\". If a function returns an error, \
+                you should try a different approach or function to complete the task, if possible.\n\
+                Reason with step by step problem-solving, but you *must* limit your thought process to **3** steps. Do not overthink.\n\
+                If you must write some code, please comment and document it well, and write it in a way that is easy to read and understand.",
             ));
 
         // Log the system prompt for debugging purposes
         dlog!("System Prompt:\n{}", system_prompt);
 
         // Start the chat with the system prompt
-        let mut chat = Chat::new(core, system_prompt, 0.35, None).with_context_size_limit(DEFAULT_CONTEXT_SIZE_LIMIT * 2);
+        let mut chat = Chat::new(core, system_prompt, 0.45, None).with_context_size_limit(DEFAULT_CONTEXT_SIZE_LIMIT / 2);
 
         let checkpoint = chat.create_checkpoint();
 
@@ -427,15 +426,19 @@ impl<'a> Agent<'a> {
             // Describe the task
             .with_section(TextSection::new(
                 "Task",
-                format!("Your task within the environment is as follows:\n```\n{}\n```", task.as_ref()),
+                format!(
+                    "Your task within the environment is as follows:\n```\n{}\n```\n\n\
+                    Complete this task using the available functions below.",
+                    task.as_ref()
+                ),
             ))
             // List the available functions
             .with_section(TextSection::new(
                 "Functions",
                 format!(
-                    "You may call *one* function per response. If you need to call a function to complete the task, you should *only* respond with the function name and the arguments in JSON format, \
-                    between <function_call> and </function_call> tags. All parameters should be provided as matching arguments. For example:\n\
-                    ```
+                    "You may call *one* function per response to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n\
+                    <tools>\n```json\n{}\n```\n</tools>\n\n\
+                    A function call must be placed between <function_call> and </function_call> XML tags. For example:
 <function_call>
 {{
     \"name\": \"function_name_here\",
@@ -444,12 +447,9 @@ impl<'a> Agent<'a> {
         \"arg2\": 42
     }}
 }}
-</function_call>\n\
-                    ```\n\
-                    The function call *must* be formatted as shown above, and must include both <function_call> and </function_call> tags. \
-                    You may call any of the following functions:\n<functions>\n```json\n{}\n```\n</functions>\n\
+</function_call>\n\n\
                     Once you have completed the task, you should call the \"exit\" function with a very short and concise summary of what you did to complete \
-                    the task, including every function call.",
+                    the task, including changes to the environment.",
                     environment.get_allowed_functions(&self.capabilities)
                         .iter()
                         .map(|f| serde_json::to_string_pretty(&f.to_json()).unwrap())
@@ -461,6 +461,7 @@ impl<'a> Agent<'a> {
         // Push the user prompt to the chat
         self.chat.push_message(ChatRole::User, user_prompt);
 
+        let mut last_function_call = None;
         let task_result = loop {
             // Create a checkpoint here in case the assistant messes up
             let checkpoint = self.chat.create_checkpoint();
@@ -480,6 +481,14 @@ impl<'a> Agent<'a> {
 
             // If there was a function call then execute it
             if let Some(function_call) = response.function_call {
+                // If this is an exact duplicate function call, then it is likely that the agent is stuck in a loop, so revert to the checkpoint
+                if Some(&function_call) == last_function_call.as_ref() {
+                    wlog!("Agent may be stuck in a loop with the same function call, reverting to last checkpoint once.");
+                    last_function_call = None;
+                    self.chat.restore_checkpoint(checkpoint);
+                    continue;
+                }
+
                 // If this was a call to "exit" then break the loop with the result
                 if function_call.name == "exit" {
                     // If there is only a "result" argument then return it, otherwise return all arguments
@@ -499,10 +508,26 @@ impl<'a> Agent<'a> {
                     &function_call.arguments,
                 );
 
-                // If the function call failed, revert to the checkpoint
+                // Record the last function call, for the purpose of avoiding loops
+                last_function_call = Some(function_call.clone());
+
+                // If the function call failed, push an error message to the chat and continue the loop, otherwise push the function result to the chat
                 let result = match result {
-                    Err(_) => {
-                        self.chat.restore_checkpoint(checkpoint);
+                    Err(e) => {
+                        wlog!(
+                            "Error executing function '{}': {}",
+                            function_call.name,
+                            e
+                        );
+
+                        // Push an error message to the chat
+                        self.chat.push_message(
+                            ChatRole::Function,
+                            serde_json::to_string_pretty(&map! {
+                                "error" => format!("Error executing function '{}': {}", function_call.name, e),
+                            })
+                            .unwrap(),
+                        );
                         continue;
                     }
                     Ok(inner_result) => inner_result,
