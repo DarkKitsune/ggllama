@@ -57,9 +57,9 @@ impl PromptSection for ListSection {
             .enumerate()
             .map(|(i, item)| {
                 if self.numbered {
-                    format!("{}. {}", i + 1, substitute_placeholders(item, data))
+                    format!("  {}. {}", i + 1, substitute_placeholders(item, data))
                 } else {
-                    format!("- {}", substitute_placeholders(item, data))
+                    format!("  - {}", substitute_placeholders(item, data))
                 }
             })
             .collect::<Vec<_>>()

@@ -166,11 +166,64 @@ impl DirectoryEnvironment {
 
         Ok(())
     }
+
+    pub fn run_python(&self, file_path: impl AsRef<Path>) -> Result<String> {
+        let full_path = self.path.join(&file_path);
+        let full_path = absolute(&full_path)
+            .unwrap_or_else(|_| panic!("Failed to get absolute path: {}", full_path.display()));
+
+        // Ensure the full path is within the directory wrapped by this environment.
+        if !full_path.starts_with(&self.path) {
+            return Err(anyhow::anyhow!(
+                "Attempted to run a script file outside the directory: {}",
+                full_path.display()
+            ));
+        }
+
+        // Ensure that the file is not environment.json, which is protected
+        if full_path.file_name().map(|n| n.to_string_lossy()) == Some("environment.json".into()) {
+            return Err(anyhow::anyhow!(
+                "Attempted to run a protected environment file: {}",
+                full_path.display()
+            ));
+        }
+
+        let output = std::process::Command::new("python")
+            .arg(full_path)
+            .output()
+            .map_err(|e| anyhow::anyhow!("Failed to execute Python: {}", e))?;
+
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        } else {
+            Err(anyhow::anyhow!(
+                "Python execution failed.\n\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
+        }
+    }
 }
 
 impl Environment for DirectoryEnvironment {
     fn environment_prompt(&self) -> String {
-        self.description.clone()
+        let files = self.get_all_files();
+        if files.is_empty() {
+            format!(
+                "The environment is a directory in a file system.\n\
+                {}",
+                self.description,
+            )
+        }
+        else {
+            format!(
+                "The environment is a directory in a file system.\n\
+                {}\n\
+                Files currently in the environment (as relative paths):\n\
+                {}",
+                self.description,
+                files.iter().map(|p| format!("  - \"{}\"", p.display())).collect::<Vec<_>>().join("\n")
+            )
+        }
     }
 
     fn available_functions(&self) -> Vec<Function<Self>> {
@@ -232,6 +285,35 @@ impl Environment for DirectoryEnvironment {
                     Ok(map! {
                         "status" => "success"
                     })
+                },
+            ),
+            // Function to run a Python script in the environment directory.
+            Function::new(
+                "run_python",
+                "Runs a Python script in the environment directory. Use a relative path within the environment directory. \
+                Returns the output of the script.",
+                vec![
+                    FunctionParameter::new("relative_path", ParameterType::String),
+                ],
+                vec![],
+                |env: &mut DirectoryEnvironment, args: &JsonMap| {
+                    let file_path = args
+                        .get("relative_path")
+                        .ok_or(anyhow::anyhow!("Missing argument: relative_path"))?
+                        .as_str()
+                        .ok_or(anyhow::anyhow!("Argument 'relative_path' is not a string"))?;
+                    let result = env.run_python(file_path);
+
+                    match result {
+                        Ok(output) => Ok(map! {
+                            "output" => output,
+                            "status" => "success"
+                        }),
+                        Err(e) => Ok(map! {
+                            "error" => e.to_string(),
+                            "status" => "error"
+                        }),
+                    }
                 },
             ),
         ]

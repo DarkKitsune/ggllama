@@ -398,7 +398,7 @@ impl<'a> Agent<'a> {
         dlog!("System Prompt:\n{}", system_prompt);
 
         // Start the chat with the system prompt
-        let mut chat = Chat::new(core, system_prompt, 0.45, None).with_context_size_limit(DEFAULT_CONTEXT_SIZE_LIMIT / 2);
+        let mut chat = Chat::new(core, system_prompt, 0.7, None).with_context_size_limit(12288);
 
         let checkpoint = chat.create_checkpoint();
 
