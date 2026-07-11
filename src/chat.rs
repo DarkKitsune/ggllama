@@ -4,7 +4,6 @@ use serde_json::Map;
 
 use crate::{
     core::Core,
-    dlog,
     inference::{Inference, InferenceCheckpoint},
     map,
     util::JsonMap,
@@ -276,8 +275,6 @@ impl<'a> Chat<'a> {
                             .cloned()
                             .unwrap_or_default(),
                     });
-
-                    dlog!(!"Function call JSON:\n{:#?}", function_call_json);
 
                     // Remove the range from the content
                     content.replace_range(

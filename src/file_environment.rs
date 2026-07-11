@@ -6,9 +6,7 @@ use std::{
 use anyhow::Result;
 
 use crate::{
-    agent::{Environment, Function, FunctionParameter, ParameterType},
-    map,
-    util::JsonMap,
+    agent::{Environment, Function, FunctionParameter, ParameterType}, map, util::JsonMap,
 };
 
 /// The state of a single task in a `DirectoryEnvironment`'s to-do list.
@@ -167,6 +165,7 @@ impl DirectoryEnvironment {
         Ok(())
     }
 
+    /// Runs a Python script in the directory wrapped by this environment and returns the output.
     pub fn run_python(&self, file_path: impl AsRef<Path>) -> Result<String> {
         let full_path = self.path.join(&file_path);
         let full_path = absolute(&full_path)
@@ -202,6 +201,41 @@ impl DirectoryEnvironment {
             ))
         }
     }
+
+    /*
+    /// Initializes a cargo project in the directory wrapped by this environment with the given name, version, and description.
+    pub fn init_cargo_project(&mut self, name: &str, version: &str) -> Result<()> {
+        // Generate the Cargo.toml contents
+        let cargo_toml_contents = format!(
+            "[package]\nname = \"{}\"\nversion = \"{}\"\nedition = \"2024\"\n\n[dependencies]\n",
+            name, version
+        );
+        self.write_file("Cargo.toml", &cargo_toml_contents)?;
+
+        // Create a src directory and a main.rs file with a simple "Hello, world!" program
+        self.write_file("src/main.rs", "fn main() {\n    println!(\"Hello, world!\");\n}\n")?;
+        
+        Ok(())
+    }
+
+    /// Runs the cargo project in the directory wrapped by this environment and returns the output.
+    pub fn run_cargo_project(&self) -> Result<String> {
+        let output = std::process::Command::new("cargo")
+            .arg("run")
+            .current_dir(&self.path)
+            .output()
+            .map_err(|e| anyhow::anyhow!("Failed to execute `cargo run`: {}", e))?;
+
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        } else {
+            Err(anyhow::anyhow!(
+                "Panic or error occurred during `cargo run`.\n\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
+        }
+    }
+    */
 }
 
 impl Environment for DirectoryEnvironment {
@@ -287,6 +321,54 @@ impl Environment for DirectoryEnvironment {
                     })
                 },
             ),
+            // Function to replace a substring in a file in the environment directory with a new substring.
+            Function::new(
+                "edit_file",
+                "Replaces the first occurrence of a target substring in a file in the environment directory with a new substring. \
+                The provided path should be a relative path within the environment directory.",
+                vec![
+                    FunctionParameter::new("relative_path", ParameterType::String),
+                    FunctionParameter::new("target", ParameterType::String),
+                    FunctionParameter::new("replacement", ParameterType::String),
+                ],
+                vec![],
+                |env: &mut DirectoryEnvironment, args: &JsonMap| {
+                    let file_path = args
+                        .get("relative_path")
+                        .ok_or(anyhow::anyhow!("Missing argument: relative_path"))?
+                        .as_str()
+                        .ok_or(anyhow::anyhow!("Argument 'relative_path' is not a string"))?;
+                    let target = args
+                        .get("target")
+                        .ok_or(anyhow::anyhow!("Missing argument: target"))?
+                        .as_str()
+                        .ok_or(anyhow::anyhow!("Argument 'target' is not a string"))?
+                        .to_string();
+                    let replacement = args
+                        .get("replacement")
+                        .ok_or(anyhow::anyhow!("Missing argument: replacement"))?
+                        .as_str()
+                        .ok_or(anyhow::anyhow!("Argument 'replacement' is not a string"))?
+                        .to_string();
+
+                    // Read the file contents, replace the target with the replacement, and write the new contents back to the file
+                    let contents = env.read_file(file_path)?;
+                    if let Some(_) = contents.find(&target) {
+                        let new_contents = contents.replacen(&target, &replacement, 1);
+                        env.write_file(file_path, &new_contents)?;
+                        Ok(map! {
+                            "status" => "success",
+                            "message" => format!("Replaced first occurrence in file \"{}\"", file_path)
+                        })
+                    } else {
+                        Ok(map! {
+                            "status" => "failure",
+                            "message" => format!("Target substring not found in file \"{}\"", file_path)
+                        })
+                    }
+                },
+            ),
+
             // Function to run a Python script in the environment directory.
             Function::new(
                 "run_python",
@@ -316,6 +398,58 @@ impl Environment for DirectoryEnvironment {
                     }
                 },
             ),
+            /*
+            // Function to initialize a cargo project in the environment directory with a given name, version, and description.
+            Function::new(
+                "init_cargo_project",
+                "Initializes a cargo project in the environment directory with the given name, version, and description. \
+                This will create a Cargo.toml file and a src/main.rs file with a simple \"Hello, world!\" program.",
+                vec![
+                    FunctionParameter::new("name", ParameterType::String),
+                    FunctionParameter::new("version", ParameterType::String),
+                ],
+                vec![],
+                |env: &mut DirectoryEnvironment, args: &JsonMap| {
+                    let name = args
+                        .get("name")
+                        .ok_or(anyhow::anyhow!("Missing argument: name"))?
+                        .as_str()
+                        .ok_or(anyhow::anyhow!("Argument 'name' is not a string"))?;
+                    let version = args
+                        .get("version")
+                        .ok_or(anyhow::anyhow!("Missing argument: version"))?
+                        .as_str()
+                        .ok_or(anyhow::anyhow!("Argument 'version' is not a string"))?;
+                    env.init_cargo_project(name, version)?;
+
+                    Ok(map! {
+                        "status" => "success"
+                    })
+                },
+            ),
+            // Function to run the cargo project in the environment directory.
+            Function::new(
+                "run_cargo_project",
+                "Runs the cargo project in the environment directory and returns the output (or stderr if a panic/error occurs). \
+                This assumes that the cargo project has already been initialized and that the main source file is src/main.rs.",
+                vec![],
+                vec![],
+                |env: &mut DirectoryEnvironment, _args: &JsonMap| {
+                    let result = env.run_cargo_project();
+
+                    match result {
+                        Ok(output) => Ok(map! {
+                            "output" => output,
+                            "status" => "success"
+                        }),
+                        Err(e) => Ok(map! {
+                            "error" => e.to_string(),
+                            "status" => "error"
+                        }),
+                    }
+                },
+            ),
+            */
         ]
     }
 }

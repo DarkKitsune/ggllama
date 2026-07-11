@@ -66,7 +66,7 @@ impl Core {
         let ctx_params = LlamaContextParams::default()
             .with_flash_attention(true)
             .with_n_ctx(None)
-            .with_n_batch(8192)
+            .with_n_batch(4096)
             .with_cache_type_k(match self.compression {
                 CompressionLevel::High => GgmlType::Q5_0,
                 CompressionLevel::Medium => GgmlType::Q8_0,
@@ -107,7 +107,7 @@ impl Core {
         fn summarization_system(formatter: PromptFormatter) -> PromptFormatter {
             formatter
                 .with_section(TextSection::new(
-                    "Your Role",
+                    None,
                     "You are an expert in summarizing long texts. \
                     User will provide text to summarize, and you must summarize it in a clear and concise manner. \
                     Include all important details.",
@@ -117,7 +117,7 @@ impl Core {
         /// Defines the structure of the input.
         fn summarization_input(formatter: PromptFormatter, inputs: &JsonMap) -> PromptFormatter {
             formatter.with_section(TextSection::new(
-                "Input Text",
+                None,
                 format!(
                     "Please summarize the following text:\n```\n{}\n```",
                     inputs["input"]
@@ -127,14 +127,14 @@ impl Core {
 
         /// Defines the structure of the output.
         fn summarization_output(inference: &mut Inference, _inputs: &JsonMap) {
-            inference.push_text("## Summary\nHere is the summarized text:\n```\n");
+            inference.push_text("Here is the summarized text:\n```\n");
             inference.infer_output("output", &["```"], false);
         }
 
         // Create a summarization pipeline
         Pipeline::new(
             self,
-            0.2,
+            0.3,
             false,
             summarization_system,
             summarization_input,
@@ -153,17 +153,17 @@ impl Core {
         fn json_builder_system(formatter: PromptFormatter) -> PromptFormatter {
             formatter
                 .with_section(TextSection::new(
-                    "Your Role",
+                    None,
                     "You are an expert in generating JSON based on a given template/schema and prompt."
                 ))
                 .with_section(TextSection::new(
-                    "Your Task",
-                    "The user will provide a JSON template in an \"Template\" section, \
-                    as well as a prompt for the JSON object in an \"Prompt\" section. \
+                    None,
+                    "The user will provide a JSON template, as well as a prompt. \
                     Create a JSON object that matches the prompt while adhering to the provided template."
                 ))
                 .with_section(ListSection::new(
-                    "JSON Guidelines",
+                    Some("JSON Guidelines".to_string()),
+                    Some("Please follow these guidelines when generating JSON:".to_string()),
                     false,
                     vec![
                         "Must follow the template strictly.".to_string(),
@@ -178,8 +178,8 @@ impl Core {
         /// Defines the structure of the input.
         fn json_builder_input(formatter: PromptFormatter, inputs: &JsonMap) -> PromptFormatter {
             formatter
-                .with_section(TextSection::new("Template", &inputs["template"]))
-                .with_section(TextSection::new("Prompt", &inputs["prompt"]))
+                .with_section(TextSection::new(Some("Template".to_string()), &inputs["template"]))
+                .with_section(TextSection::new(Some("Prompt".to_string()), &inputs["prompt"]))
         }
 
         /// Defines the structure of the output.
@@ -191,7 +191,7 @@ impl Core {
         // Create a JSON builder pipeline
         Pipeline::new(
             self,
-            0.6,
+            0.65,
             false,
             json_builder_system,
             json_builder_input,
@@ -222,11 +222,11 @@ impl Core {
         fn multiple_choice_system(formatter: PromptFormatter, role: String) -> PromptFormatter {
             formatter
                 .with_section(TextSection::new(
-                    "Your Role",
+                    Some("Your Role".to_string()),
                     role
                 ))
                 .with_section(TextSection::new(
-                    "How to Answer",
+                    Some("How to Answer".to_string()),
                     "Respond with '{\"answer\": \"<letter>\"}' where <letter> is the letter corresponding to the correct answer. \
                     For example, if the options are 'A. `Option 1` | B. `Option 2` | C. `Option 3`', and the correct answer is 'Option 2', you should respond with '{\"answer\": \"B\"}'."
                 ))
@@ -235,10 +235,10 @@ impl Core {
         /// Defines the structure of the input.
         fn multiple_choice_input(formatter: PromptFormatter, inputs: &JsonMap) -> PromptFormatter {
             formatter
-                .with_section(TextSection::new("Question", &inputs["question"]))
+                .with_section(TextSection::new(Some("Question".to_string()), &inputs["question"]))
                 // Split the options by '|', limit the number, and append the corresponding letters
                 .with_section(TextSection::new(
-                    "Options",
+                    Some("Options".to_string()),
                     &inputs["options"]
                         .as_array()
                         .unwrap()
@@ -316,16 +316,16 @@ impl Core {
         fn scene_writer_system(formatter: PromptFormatter) -> PromptFormatter {
             formatter
             .with_section(TextSection::new(
-                "Your Role",
+                Some("Your Role".to_string()),
                 "You are a script writer for an adventure game."
             ))
             .with_section(TextSection::new(
-                "Your Task",
+                Some("Your Task".to_string()),
                 "The user will give you an unfinished scene under \"Unfinished Scene\". \
                 Please determine the next \"turn\" in the scene, whether it is an action, dialogue, or narration turn."
             ))
             .with_section(TextSection::new(
-                "Response Format",
+                Some("Response Format".to_string()),
 "Respond with the next turn in one of the following JSON formats depending on the type.
 If the turn is an action turn, it should follow this format:
 ```json
@@ -355,11 +355,12 @@ Be creative, let every character have a chance to shine, and keep the story inte
 
             formatter
                 .with_section(TextSection::new(
-                    "Unfinished Scene",
+                    Some("Unfinished Scene".to_string()),
                     inputs["scene"].as_str().unwrap(),
                 ))
                 .with_section(ListSection::new(
-                    "Controllable Characters",
+                    Some("Controllable Characters".to_string()),
+                    Some("These are the list of characters who can act in the next turn:".to_string()),
                     false,
                     controllable_characters,
                 ))
@@ -477,16 +478,16 @@ Be creative, let every character have a chance to shine, and keep the story inte
         fn turn_extractor_system(formatter: PromptFormatter) -> PromptFormatter {
             formatter
                 .with_section(TextSection::new(
-                    "Your Role",
+                    Some("Your Role".to_string()),
                     "You are an assistant tasked with converting natural language commands into action or dialog turns for characters in a scene."
                 ))
                 .with_section(TextSection::new(
-                    "Your Task",
+                    Some("Your Task".to_string()),
                     "The user will give you the scene so far under \"Scene\", a character named under \"Character\", \
                     and a command for that character to follow under \"Command\"."
                 ))
                 .with_section(TextSection::new(
-                    "How to Respond",
+                    Some("How to Respond".to_string()),
                     "You should respond with JSON representing the character following the command in the scene.\n\
                     The content should consist of a full description of the action or dialogue.\n\
                     If the command involves the character performing an action, respond with the following JSON format:
@@ -508,13 +509,13 @@ Be creative, let every character have a chance to shine, and keep the story inte
         /// Defines the structure of the input
         fn turn_extractor_input(formatter: PromptFormatter, inputs: &JsonMap) -> PromptFormatter {
             formatter
-                .with_section(TextSection::new("Scene", inputs["scene"].as_str().unwrap()))
+                .with_section(TextSection::new(Some("Scene".to_string()), inputs["scene"].as_str().unwrap()))
                 .with_section(TextSection::new(
-                    "Character",
+                    Some("Character".to_string()),
                     inputs["character"].as_str().unwrap(),
                 ))
                 .with_section(TextSection::new(
-                    "Command",
+                    Some("Command".to_string()),
                     inputs["command"].as_str().unwrap(),
                 ))
         }

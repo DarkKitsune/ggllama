@@ -31,28 +31,39 @@ pub fn substitute_placeholders(input: &str, data: &JsonMap) -> String {
 /// A numbered/bulleted list section.
 /// If `numbered` is true, the list will be numbered; otherwise, it will be bulleted.
 pub struct ListSection {
-    name: String,
+    name: Option<String>,
     numbered: bool,
+    preamble: Option<String>,
     items: Vec<String>,
 }
 
 impl ListSection {
-    pub fn new(name: impl Display, numbered: bool, items: Vec<String>) -> Self {
+    pub fn new(name: Option<String>, preamble: Option<String>, numbered: bool, items: Vec<String>) -> Self {
         Self {
-            name: name.to_string(),
+            name,
             numbered,
+            preamble,
             items,
         }
     }
 }
 
 impl PromptSection for ListSection {
-    fn name(&self) -> String {
+    fn name(&self) -> Option<String> {
         self.name.clone()
     }
 
     fn render(&self, data: &JsonMap) -> String {
-        self.items
+        let mut render_string = String::new();
+
+        // If there is a preamble, render it first, substituting placeholders and replacing multiple newlines with a single newline to avoid breaking formatting
+        if let Some(preamble) = &self.preamble {
+            render_string.push_str(&substitute_placeholders(preamble, data).replace("\n\n", "\n"));
+            render_string.push('\n');
+        }
+
+        // Render each item in the list, substituting placeholders and formatting with either numbers or bullets
+        render_string.push_str(&self.items
             .iter()
             .enumerate()
             .map(|(i, item)| {
@@ -63,13 +74,16 @@ impl PromptSection for ListSection {
                 }
             })
             .collect::<Vec<_>>()
-            .join("\n")
+            .join("\n"));
+
+        render_string
     }
 
     fn boxed_clone(&self) -> Box<dyn PromptSection> {
         Box::new(Self {
             name: self.name.clone(),
             numbered: self.numbered,
+            preamble: self.preamble.clone(),
             items: self.items.clone(),
         })
     }
@@ -103,7 +117,7 @@ impl SpatialSection {
 /// A trait representing a section of a prompt.
 pub trait PromptSection {
     /// Returns the name of the prompt section.
-    fn name(&self) -> String;
+    fn name(&self) -> Option<String>;
     /// Renders the content of the prompt section as a string, which is used to construct the final prompt.
     /// Should also substitute "<|placeholder|>" placeholders with the corresponding value from the data map.
     /// The `PromptFormatter` automatically places the section name as a header before the rendered content.
@@ -115,21 +129,21 @@ pub trait PromptSection {
 /// A basic text prompt section that hold simple text.
 #[derive(Clone)]
 pub struct TextSection {
-    name: String,
+    name: Option<String>,
     content: String,
 }
 
 impl TextSection {
-    pub fn new(name: impl Display, content: impl Display) -> Self {
+    pub fn new(name: Option<String>, content: impl Display) -> Self {
         Self {
-            name: name.to_string(),
+            name,
             content: content.to_string(),
         }
     }
 }
 
 impl PromptSection for TextSection {
-    fn name(&self) -> String {
+    fn name(&self) -> Option<String> {
         self.name.clone()
     }
 
@@ -167,7 +181,10 @@ impl PromptFormatter {
     pub fn format(&self, data: &JsonMap) -> String {
         self.sections
             .iter()
-            .map(|s| format!("## {}\n{}", s.name(), s.render(data)))
+            .map(|s| match s.name() {
+                Some(name) => format!("## {}\n{}", name, s.render(data)),
+                None => s.render(data),
+            })
             .collect::<Vec<_>>()
             .join("\n\n")
     }

@@ -8,7 +8,7 @@ use anyhow::Result;
 use serde_json::Map;
 
 use crate::{
-    chat::{Chat, ChatCheckpoint, ChatRole, DEFAULT_CONTEXT_SIZE_LIMIT}, core::Core, dlog, map, prompt_formatter::{PromptFormatter, TextSection}, wlog,
+    chat::{Chat, ChatCheckpoint, ChatRole}, core::Core, dlog, map, prompt_formatter::{PromptFormatter, TextSection}, wlog,
 };
 
 /// A capability that an agent can have, which can be used to determine what the agent is allowed to do.
@@ -376,21 +376,21 @@ pub struct Agent<'a> {
 
 impl<'a> Agent<'a> {
     /// Creates a new agent with capabilities in the given environment.
-    pub fn new(core: &'a Core, capabilities: Vec<Capability>) -> Self {
+    pub fn new(core: &'a Core, creativity: f32, capabilities: Vec<Capability>) -> Self {
         // Create the system prompt
         let system_prompt = PromptFormatter::new()
             // Describe the agent's role
             .with_section(TextSection::new(
-                "Your Role",
+                None,
                 "You are an expert agent who is knowledgeable in many areas including programming, writing, and math.\n\
                 The user will give you a task labeled \"Task\" which you should complete by using the available functions in \
-                \"Functions\" to interact with the \"Environment\". You may call one function per response to assist with completing the task.\n\
+                \"Functions\" to interact with the \"Environment\". You **must** call exactly one function per response to assist with completing the task.\n\
                 Once you have completed the task, you should call the \"exit\" function with a very short and concise summary of what you did to complete \
                 the task, including changes to the environment. If you are unable to complete the task with the available functions, \
                 you should call the \"exit\" function and explain why you were unable to complete the task.\n\
                 A function may return an error in a JSON field called \"error\". If a function returns an error, \
                 you should try a different approach or function to complete the task, if possible.\n\
-                Reason with step by step problem-solving, but you *must* limit your thought process to **3** steps. Do not overthink.\n\
+                Reason with step by step problem-solving, but you **must** limit your thought process to **3** steps. Do not overthink.\n\
                 If you must write some code, please comment and document it well, and write it in a way that is easy to read and understand.",
             ));
 
@@ -398,7 +398,7 @@ impl<'a> Agent<'a> {
         dlog!("System Prompt:\n{}", system_prompt);
 
         // Start the chat with the system prompt
-        let mut chat = Chat::new(core, system_prompt, 0.7, None).with_context_size_limit(12288);
+        let mut chat = Chat::new(core, system_prompt, creativity, None).with_context_size_limit(12288);
 
         let checkpoint = chat.create_checkpoint();
 
@@ -410,33 +410,26 @@ impl<'a> Agent<'a> {
     }
 
     /// Gives the agent a task and informs it of the available functions, then runs the agent until it has completed its task or reached a stopping condition.
-    pub fn run(
+    pub fn run<E: Environment>(
         &mut self,
-        environment: &mut impl Environment,
+        environment: &mut E,
         use_reasoning: bool,
         task: impl AsRef<str>,
     ) -> serde_json::Value {
+        let task = task.as_ref().to_string();
+
         // Create the user prompt with the task and available functions
         let user_prompt = PromptFormatter::new()
             // Describe the environment
             .with_section(TextSection::new(
-                "Environment",
+                Some("Environment".to_string()),
                 environment.environment_prompt(),
-            ))
-            // Describe the task
-            .with_section(TextSection::new(
-                "Task",
-                format!(
-                    "Your task within the environment is as follows:\n```\n{}\n```\n\n\
-                    Complete this task using the available functions below.",
-                    task.as_ref()
-                ),
             ))
             // List the available functions
             .with_section(TextSection::new(
-                "Functions",
+                Some("Functions".to_string()),
                 format!(
-                    "You may call *one* function per response to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n\
+                    "You **must** call exactly one function per response to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n\
                     <tools>\n```json\n{}\n```\n</tools>\n\n\
                     A function call must be placed between <function_call> and </function_call> XML tags. For example:
 <function_call>
@@ -456,6 +449,12 @@ impl<'a> Agent<'a> {
                         .collect::<Vec<_>>()
                         .join("\n\n")
                 ),
+            ))
+            
+            // Describe the task
+            .with_section(TextSection::new(
+                Some("Task".to_string()),
+                task,
             ));
 
         // Push the user prompt to the chat
@@ -469,14 +468,26 @@ impl<'a> Agent<'a> {
             // Infer the next response from the agent
             let response = self.chat.infer_response(None, &[], None, use_reasoning);
 
-            // Log the agent's response for debugging purposes
-            if let Some(function_call) = response.function_call.as_ref() {
-                // Don't log if it is an "exit" function call, as it is expected to be called when the agent finishes its task
+            // If there was no function call then push an error message to the chat and continue the loop
+            if response.function_call.is_none() {
+                wlog!("No function call detected in the agent's response: {:#?}.", response);
+                self.chat.push_message(
+                    ChatRole::Function,
+                    serde_json::to_string_pretty(&map! {
+                        "error" => "No function call detected in the agent's response, or the function call was malformed. \
+                        Please make sure to call exactly one function in each response, using JSON, between <function_call> \
+                        and </function_call> XML tags.",
+                    })
+                    .unwrap(),
+                );
+                continue;
+            }
+            // Otherwise log it for debugging purposes
+            else {
+                let function_call = response.function_call.as_ref().unwrap();
                 if function_call.name != "exit" {
                     dlog!("Function call:\n{:#?}", function_call);
                 }
-            } else {
-                dlog!(!"Response:\n{:#?}", response);
             }
 
             // If there was a function call then execute it
