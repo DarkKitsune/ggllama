@@ -1,4 +1,4 @@
-use std::{fmt::Display, path::Path};
+use std::{fmt::Display, num::NonZeroU32, path::Path};
 
 use llama_cpp_4::{
     context::{LlamaContext, params::LlamaContextParams},
@@ -9,12 +9,7 @@ use llama_cpp_4::{
 use static_init::dynamic;
 
 use crate::{
-    chat::Chat,
-    inference::Inference,
-    pipeline::Pipeline,
-    prompt_formatter::{ListSection, PromptFormatter, TextSection},
-    util::{JsonMap, JsonValue},
-    wlog,
+    chat::Chat, inference::Inference, pipeline::Pipeline, prompt_formatter::{ListSection, PromptFormatter, TextSection}, util::{JsonMap, JsonValue}, wlog,
 };
 
 #[dynamic]
@@ -62,13 +57,13 @@ impl Core {
 
     /// Starts a new inference job with a new context.
     /// The `creativity` parameter controls the randomness of the generated output, with higher values resulting in more creative responses.
-    pub fn infer<'a>(&'a self, creativity: f32, seed: Option<u32>) -> Inference<'a> {
+    pub fn infer<'a>(&'a self, creativity: f32, seed: Option<u32>, context_size: u32) -> Inference<'a> {
         let ctx_params = LlamaContextParams::default()
             .with_flash_attention(true)
-            .with_n_ctx(None)
+            .with_n_ctx(Some(NonZeroU32::new(context_size).expect("context_size must be non-zero")))
             .with_n_batch(4096)
             .with_cache_type_k(match self.compression {
-                CompressionLevel::High => GgmlType::Q5_0,
+                CompressionLevel::High => GgmlType::Q5_1,
                 CompressionLevel::Medium => GgmlType::Q8_0,
                 CompressionLevel::None => GgmlType::F16,
             })
@@ -95,14 +90,15 @@ impl Core {
         system_prompt: impl Display,
         creativity: f32,
         seed: Option<u32>,
+        context_size: Option<u32>,
     ) -> Chat<'_> {
-        Chat::new(self, system_prompt.to_string(), creativity, seed)
+        Chat::new(self, system_prompt.to_string(), creativity, seed, context_size.unwrap_or(16384))
     }
 
     /// Creates a new pipeline for summarizing text.
     /// The text to summarize should be provided as \"input\" in the input hashmap.
     /// The output of the summarization will be provided as \"output\" in the output hashmap.
-    pub fn new_summarizer<'a>(&'a self) -> Pipeline<'a> {
+    pub fn new_summarizer<'a>(&'a self, max_size: u32) -> Pipeline<'a> {
         /// Defines the structure of the system prompt.
         fn summarization_system(formatter: PromptFormatter) -> PromptFormatter {
             formatter
@@ -110,7 +106,8 @@ impl Core {
                     None,
                     "You are an expert in summarizing long texts. \
                     User will provide text to summarize, and you must summarize it in a clear and concise manner. \
-                    Include all important details.",
+                    Include all important details.\n\
+                    If <think> and </think> XML tags appear in the text, then treat them as your own internal thoughts.",
                 ))
         }
 
@@ -140,7 +137,7 @@ impl Core {
             summarization_input,
             summarization_output,
             &[],
-            Some(99999999),
+            Some(max_size),
             false,
         )
     }

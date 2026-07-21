@@ -11,7 +11,6 @@ use crate::{
 };
 
 /// The chat compacts its own context if it exceeds this many tokens
-pub const DEFAULT_CONTEXT_SIZE_LIMIT: usize = 16384;
 const MEMORY_HEADER: &str = "## Your Memory";
 
 /// A checkpoint storing the state of a `Chat`.
@@ -21,7 +20,6 @@ pub struct ChatCheckpoint {
     system_prompt: String,
     all_messages: Vec<ChatMessage>,
     queued_messages: Vec<ChatMessage>,
-    context_size_limit: usize,
 }
 
 /// Represents a response from the assistant in the chat.
@@ -95,7 +93,7 @@ pub struct Chat<'a> {
     all_messages: Vec<ChatMessage>,
     /// Contains just the messages that have been queued to be added to the context on the next inferred response.
     queued_messages: Vec<ChatMessage>,
-    context_size_limit: usize,
+    context_size_limit: u32,
 }
 
 impl<'a> Chat<'a> {
@@ -106,11 +104,12 @@ impl<'a> Chat<'a> {
         system_prompt: impl Display,
         creativity: f32,
         seed: Option<u32>,
+        context_size_limit: u32,
     ) -> Self {
         let system_prompt = system_prompt.to_string();
 
         // Begin inference
-        let inference = core.infer(creativity, seed);
+        let inference = core.infer(creativity, seed, context_size_limit); // Use double the context size limit for inference to allow for some buffer
 
         // Initialize the all_messages and queued_messages vectors with the system prompt
         // We will actually put messages into the Inference's context later when inferring tokens.
@@ -126,15 +125,8 @@ impl<'a> Chat<'a> {
             inference,
             all_messages,
             queued_messages,
-            context_size_limit: DEFAULT_CONTEXT_SIZE_LIMIT,
+            context_size_limit,
         }
-    }
-
-    /// Returns self with the given context size limit.
-    /// If the chat's context grows beyond this many tokens, it will be compacted.
-    pub fn with_context_size_limit(mut self, limit: usize) -> Self {
-        self.context_size_limit = limit;
-        self
     }
 
     /// Get a reference to all of the messages in the chat.
@@ -220,8 +212,8 @@ impl<'a> Chat<'a> {
 
                 // Parse the function calls from the response, until no more are found
                 let mut function_call = None;
-                if let Some(parse_begin) = content.rfind("<function_call>")
-                    && let Some(parse_end) = content.rfind("</function_call>").or_else(|| {
+                if let Some(parse_begin) = content.find("<function_call>")
+                    && let Some(parse_end) = content.find("</function_call>").or_else(|| {
                         // If content ends with } then assume the function call JSON might be complete and use the end of the content as the parse_end
                         if content.ends_with('}') {
                             Some(content.len())
@@ -251,6 +243,29 @@ impl<'a> Chat<'a> {
                                 function_call_str_fixed.pop();
                             }
                             function_call_json = serde_json::from_str(&function_call_str_fixed);
+
+                            // If it still fails, try fixing trailing commas
+                            if function_call_json.is_err() {
+                                let mut function_call_str_pop = function_call_str.trim().to_string();
+                                if function_call_str_pop.ends_with('}') {
+                                    function_call_str_pop.pop();
+                                    function_call_str_pop = function_call_str_pop.trim_end().to_string();
+                                    if function_call_str_pop.ends_with('}') {
+                                        function_call_str_pop.pop();
+                                        function_call_str_pop = function_call_str_pop.trim_end().to_string();
+                                        if function_call_str_pop.ends_with(',') {
+                                            function_call_str_pop.pop();
+                                            function_call_str_pop.push_str("}}");
+                                            function_call_json = serde_json::from_str(&function_call_str_pop);
+                                        }
+                                    }
+                                    else if function_call_str_pop.ends_with(',') {
+                                        function_call_str_pop.pop();
+                                        function_call_str_pop.push_str("}");
+                                        function_call_json = serde_json::from_str(&function_call_str_pop);
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -311,7 +326,6 @@ impl<'a> Chat<'a> {
             system_prompt: self.system_prompt.clone(),
             all_messages: self.all_messages.clone(),
             queued_messages: self.queued_messages.clone(),
-            context_size_limit: self.context_size_limit,
         }
     }
 
@@ -322,7 +336,6 @@ impl<'a> Chat<'a> {
         self.system_prompt = checkpoint.system_prompt;
         self.all_messages = checkpoint.all_messages;
         self.queued_messages = checkpoint.queued_messages;
-        self.context_size_limit = checkpoint.context_size_limit;
     }
 
     /// Supplies the outputs for the response.
@@ -332,10 +345,10 @@ impl<'a> Chat<'a> {
         self.inference.supply_outputs_for_response(map);
     }
 
-    /// Compacts the chat context if it exceeds the context size limit.
+    /// Compacts the chat context if it exceeds half the context size limit.
     /// This works by taking the first half of the chat's messages, summarizing them, then inserting the summary back into the context.
     pub(crate) fn compact_context(&mut self) {
-        if self.inference.context_len() > self.context_size_limit {
+        if self.inference.context_len() > self.context_size_limit as usize / 2 {
             // Get the first half of the chat's messages to summarize
             let half = self.all_messages.len() / 2;
 
@@ -366,7 +379,7 @@ impl<'a> Chat<'a> {
             // Summarize the messages
             let summary = {
                 // Create summarizer pipeline
-                let mut summarizer = self.inference.core().new_summarizer();
+                let mut summarizer = self.inference.core().new_summarizer(self.context_size_limit + 1);
 
                 // Process the chat log through the summarizer
                 summarizer.run(&map! {

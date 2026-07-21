@@ -1,7 +1,5 @@
 use std::{
-    cell::RefCell,
-    fmt::{Debug, Display},
-    rc::Rc,
+    cell::RefCell, fmt::{Debug, Display}, marker::PhantomData, rc::Rc,
 };
 
 use anyhow::Result;
@@ -14,14 +12,20 @@ use crate::{
 /// A capability that an agent can have, which can be used to determine what the agent is allowed to do.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Capability {
+    Python,
+    Rust,
     FileWrite,
+    FileExecute,
     Other(String),
 }
 
 impl Display for Capability {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Capability::Python => write!(f, "working with Python code"),
+            Capability::Rust => write!(f, "working with Rust code"),
             Capability::FileWrite => write!(f, "modifying files"),
+            Capability::FileExecute => write!(f, "executing files"),
             Capability::Other(s) => write!(f, "{}", s),
         }
     }
@@ -368,58 +372,31 @@ impl<T> Environment for BasicEnvironment<T> {
 
 /// A general purpose agent that can be used to perform various tasks or act out a role.
 /// The agent can be configured with an environment, a set of capabilities which define its capabilities, and a task.
-pub struct Agent<'a> {
+pub struct Agent<'a, E: Environment> {
     chat: Chat<'a>,
     checkpoint: ChatCheckpoint,
     capabilities: Vec<Capability>,
+    _phantom: PhantomData<E>,
 }
 
-impl<'a> Agent<'a> {
+impl<'a, E: Environment> Agent<'a, E> {
     /// Creates a new agent with capabilities in the given environment.
-    pub fn new(core: &'a Core, creativity: f32, capabilities: Vec<Capability>) -> Self {
+    pub fn new(core: &'a Core, environment: &E, creativity: f32, capabilities: Vec<Capability>) -> Self {
         // Create the system prompt
         let system_prompt = PromptFormatter::new()
             // Describe the agent's role
             .with_section(TextSection::new(
                 None,
                 "You are an expert agent who is knowledgeable in many areas including programming, writing, and math.\n\
-                The user will give you a task labeled \"Task\" which you should complete by using the available functions in \
-                \"Functions\" to interact with the \"Environment\". You **must** call exactly one function per response to assist with completing the task.\n\
+                The user will give you a task labeled \"Task\" which you should complete by using the available functions in \"Functions\".\n\
+                Think about a problem step-by-step, but do *not* think for too many sentences. **Come to the solution quickly and concisely**.\n\
+                After each step you take towards completing the task, plan ahead and think about which steps to take next.\n\
                 Once you have completed the task, you should call the \"exit\" function with a very short and concise summary of what you did to complete \
                 the task, including changes to the environment. If you are unable to complete the task with the available functions, \
-                you should call the \"exit\" function and explain why you were unable to complete the task.\n\
-                A function may return an error in a JSON field called \"error\". If a function returns an error, \
-                you should try a different approach or function to complete the task, if possible.\n\
-                Reason with step by step problem-solving, but you **must** limit your thought process to **3** steps. Do not overthink.\n\
-                If you must write some code, please comment and document it well, and write it in a way that is easy to read and understand.",
-            ));
-
-        // Log the system prompt for debugging purposes
-        dlog!("System Prompt:\n{}", system_prompt);
-
-        // Start the chat with the system prompt
-        let mut chat = Chat::new(core, system_prompt, creativity, None).with_context_size_limit(12288);
-
-        let checkpoint = chat.create_checkpoint();
-
-        Self {
-            chat,
-            checkpoint,
-            capabilities,
-        }
-    }
-
-    /// Gives the agent a task and informs it of the available functions, then runs the agent until it has completed its task or reached a stopping condition.
-    pub fn run<E: Environment>(
-        &mut self,
-        environment: &mut E,
-        use_reasoning: bool,
-        task: impl AsRef<str>,
-    ) -> serde_json::Value {
-        let task = task.as_ref().to_string();
-
-        // Create the user prompt with the task and available functions
-        let user_prompt = PromptFormatter::new()
+                you should call the \"exit\" function with the reason why you were unable to complete the task.\n\
+                A function may return an error in a JSON field called \"error\", in which case you should adjust your plan and try again using that information.\n\
+                If you write code, make sure it is **formatted**, **organized into separate modules/files**, **well-commented** and **intuitive**.",
+            ))
             // Describe the environment
             .with_section(TextSection::new(
                 Some("Environment".to_string()),
@@ -429,31 +406,60 @@ impl<'a> Agent<'a> {
             .with_section(TextSection::new(
                 Some("Functions".to_string()),
                 format!(
-                    "You **must** call exactly one function per response to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n\
+                    "You must call exactly **one** function per response to assist with the user's query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n\
                     <tools>\n```json\n{}\n```\n</tools>\n\n\
                     A function call must be placed between <function_call> and </function_call> XML tags. For example:
 <function_call>
 {{
-    \"name\": \"function_name_here\",
+    \"name\": \"exit\",
     \"arguments\": {{
-        \"arg1\": \"value1\",
-        \"arg2\": 42
+        \"result\": \"Fixed the issue with user input by:\\n\
+        - Validating the input to ensure it is a number.\\n\
+        - Adding error handling to catch any exceptions.\\n\
+        - Running tests to verify the fix.\"
     }}
 }}
 </function_call>\n\n\
-                    Once you have completed the task, you should call the \"exit\" function with a very short and concise summary of what you did to complete \
-                    the task, including changes to the environment.",
-                    environment.get_allowed_functions(&self.capabilities)
+                    Once you have completed what the user asked for, you should call the \"exit\" function with a very short and concise summary of what you did to complete \
+                    the task the user asked for, or to retrieve the information that the user requested. Mention any and all changes you made.",
+                    environment.get_allowed_functions(&capabilities)
                         .iter()
                         .map(|f| serde_json::to_string_pretty(&f.to_json()).unwrap())
                         .collect::<Vec<_>>()
                         .join("\n\n")
                 ),
-            ))
-            
+            ));
+
+        // Log the system prompt for debugging purposes
+        dlog!("System Prompt:\n{}", system_prompt);
+
+        // Start the chat with the system prompt
+        let mut chat = core.start_chat(system_prompt, creativity, None, Some(65536));
+
+        let checkpoint = chat.create_checkpoint();
+
+        Self {
+            chat,
+            checkpoint,
+            capabilities,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Gives the agent a task and informs it of the available functions, then runs the agent until it has completed its task or reached a stopping condition.
+    pub fn run(
+        &mut self,
+        environment: &mut E,
+        use_reasoning: bool,
+        task: impl AsRef<str>,
+    ) -> serde_json::Value {
+        let task = task.as_ref().to_string();
+
+        // Create the user prompt with the task and available functions
+        let user_prompt = PromptFormatter::new()
             // Describe the task
             .with_section(TextSection::new(
-                Some("Task".to_string()),
+                None,
                 task,
             ));
 

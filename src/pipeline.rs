@@ -25,17 +25,14 @@ impl<'a> Pipeline<'a> {
         mut input_fn: impl FnMut(PromptFormatter, &JsonMap) -> PromptFormatter + 'static,
         mut output_fn: impl FnMut(&mut Inference, &JsonMap) + 'static,
         example_pairs: &[(JsonMap, JsonMap)],
-        context_size: Option<usize>,
+        context_size: Option<u32>,
         use_reasoning: bool,
     ) -> Self {
         // Initialize the system prompt using the provided system function
         let system_prompt = (system_fn)(PromptFormatter::new());
 
         // Start the chat
-        let mut chat = core.start_chat(system_prompt, creativity, None);
-        if let Some(size) = context_size {
-            chat = chat.with_context_size_limit(size);
-        }
+        let mut chat = core.start_chat(system_prompt, creativity, None, context_size);
 
         // Generate example messages from the example pairs
         for (inputs, outputs) in example_pairs {

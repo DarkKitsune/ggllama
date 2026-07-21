@@ -6,7 +6,7 @@ use std::{
 use anyhow::Result;
 
 use crate::{
-    agent::{Environment, Function, FunctionParameter, ParameterType}, map, util::JsonMap,
+    agent::{Capability, Environment, Function, FunctionParameter, ParameterType}, map, util::JsonMap,
 };
 
 /// The state of a single task in a `DirectoryEnvironment`'s to-do list.
@@ -201,8 +201,7 @@ impl DirectoryEnvironment {
             ))
         }
     }
-
-    /*
+    
     /// Initializes a cargo project in the directory wrapped by this environment with the given name, version, and description.
     pub fn init_cargo_project(&mut self, name: &str, version: &str) -> Result<()> {
         // Generate the Cargo.toml contents
@@ -235,7 +234,6 @@ impl DirectoryEnvironment {
             ))
         }
     }
-    */
 }
 
 impl Environment for DirectoryEnvironment {
@@ -303,7 +301,9 @@ impl Environment for DirectoryEnvironment {
                     FunctionParameter::new("relative_path", ParameterType::String),
                     FunctionParameter::new("contents", ParameterType::String),
                 ],
-                vec![],
+                vec![
+                    Capability::FileWrite,
+                ],
                 |env: &mut DirectoryEnvironment, args: &JsonMap| {
                     let file_path = args
                         .get("relative_path")
@@ -331,7 +331,9 @@ impl Environment for DirectoryEnvironment {
                     FunctionParameter::new("target", ParameterType::String),
                     FunctionParameter::new("replacement", ParameterType::String),
                 ],
-                vec![],
+                vec![
+                    Capability::FileWrite,
+                ],
                 |env: &mut DirectoryEnvironment, args: &JsonMap| {
                     let file_path = args
                         .get("relative_path")
@@ -377,7 +379,10 @@ impl Environment for DirectoryEnvironment {
                 vec![
                     FunctionParameter::new("relative_path", ParameterType::String),
                 ],
-                vec![],
+                vec![
+                    Capability::Python,
+                    Capability::FileExecute,
+                ],
                 |env: &mut DirectoryEnvironment, args: &JsonMap| {
                     let file_path = args
                         .get("relative_path")
@@ -398,7 +403,7 @@ impl Environment for DirectoryEnvironment {
                     }
                 },
             ),
-            /*
+            
             // Function to initialize a cargo project in the environment directory with a given name, version, and description.
             Function::new(
                 "init_cargo_project",
@@ -408,7 +413,10 @@ impl Environment for DirectoryEnvironment {
                     FunctionParameter::new("name", ParameterType::String),
                     FunctionParameter::new("version", ParameterType::String),
                 ],
-                vec![],
+                vec![
+                    Capability::Rust,
+                    Capability::FileWrite,
+                ],
                 |env: &mut DirectoryEnvironment, args: &JsonMap| {
                     let name = args
                         .get("name")
@@ -433,7 +441,10 @@ impl Environment for DirectoryEnvironment {
                 "Runs the cargo project in the environment directory and returns the output (or stderr if a panic/error occurs). \
                 This assumes that the cargo project has already been initialized and that the main source file is src/main.rs.",
                 vec![],
-                vec![],
+                vec![
+                    Capability::Rust,
+                    Capability::FileExecute,
+                ],
                 |env: &mut DirectoryEnvironment, _args: &JsonMap| {
                     let result = env.run_cargo_project();
 
@@ -449,7 +460,6 @@ impl Environment for DirectoryEnvironment {
                     }
                 },
             ),
-            */
         ]
     }
 }

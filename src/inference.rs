@@ -16,14 +16,14 @@ use crate::{
 };
 
 const BATCH_CAPACITY: usize = 4096;
-const CREATIVITY_NUDGE_DOWN_EVERY_N: usize = 256; // Every N tokens, we nudge the creativity down towards 0.0 for stability over long contexts.
+const CREATIVITY_NUDGE_DOWN_EVERY_N: usize = 768; // Every N tokens, we nudge the creativity down towards 0.0 for stability over long contexts.
 /// Higher = creativity adapts downwards slower.
-const CREATIVITY_DOWN_DIVISOR: f32 = 4.5;
+const CREATIVITY_DOWN_DIVISOR: f32 = 4.0;
 /// Higher = creativity adapts upwards slower.
-const CREATIVITY_UP_DIVISOR: f32 = 3.5;
+const CREATIVITY_UP_DIVISOR: f32 = 3.0;
 /// When restoring a checkpoint, creativity is temporarily raised then reduced again after this many tokens.
 /// This is to encourage creativity and avoid the model getting stuck in a loop of repeating the same output after restoring a checkpoint.
-const CHECKPOINT_RESTORE_CREATIVITY_GRACE: usize = 12;
+const CHECKPOINT_RESTORE_CREATIVITY_GRACE: usize = 16;
 
 /// Helper function to create a new sampler.
 fn new_sampler(creativity: f32, seed: u32) -> LlamaSampler {
@@ -31,7 +31,7 @@ fn new_sampler(creativity: f32, seed: u32) -> LlamaSampler {
     let creativity = creativity.clamp(0.0, 1.0);
 
     // Calculate a safe minimum probability based on creativity
-    let min_probability = creativity * 0.10 + 0.05;
+    let min_probability = creativity * 0.05 + 0.1;
 
     // Calculate a probability target based on creativity
     // If creativity is very close zero then set target to -1.0 as this makes the adaptive_p sampler a no-op
@@ -543,7 +543,9 @@ impl<'a> Inference<'a> {
             self.tokens.push(token);
 
             // Decode the batch into the context, which adds the token to the context
-            self.context.decode(&mut self.batch).unwrap();
+            self.context.decode(&mut self.batch).map_err(|e| {
+                anyhow::anyhow!("Failed to decode token into context: {:?}\nPerhaps the batched tokens exceeded the context size limit?", e)
+            }).unwrap();
         }
 
         // Calculate inference timing

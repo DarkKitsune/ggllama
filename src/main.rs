@@ -90,7 +90,7 @@ fn main() {
     );
 
     // Create the agent
-    let mut agent = Agent::new(&core, 0.5, vec![]);
+    let mut agent = Agent::new(&core, &mut environment, 0.5, vec![]);
 
     // Have them write the game
     let result = agent.run(
