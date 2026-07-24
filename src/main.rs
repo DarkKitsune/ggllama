@@ -10,7 +10,7 @@ use ggllama::{
 fn main() {
     // Initialize the core with the model and some KV cache quantization/compression
     let core = Core::from_model(
-        "models/Ornith-1.0-9B-abliterated-dpo-Q5_K_L-imat-GGUF.gguf",
+        "models/qwen3.5-9b-qworus-Q5_K_L-imat-GGUF.gguf",
         CompressionLevel::Medium,
         false,
     );
@@ -35,7 +35,7 @@ fn main() {
         // Function to read the contents of a file by its name
         Function::new(
             "read_file",
-            "Reads the contents of the file with the given name",
+            "Reads the contents of the file under `file_name`",
             vec![FunctionParameter::new("file_name", ParameterType::String)],
             vec![],
             |env: &mut BasicEnvironment<HashMap<String, String>>, args| {
@@ -55,7 +55,7 @@ fn main() {
         // Function to write contents to a file by its name
         Function::new(
             "write_file",
-            "Writes the given content to the file with the given name. If the file does not exist, it will be created.",
+            "Writes the given content to the file under `file_name`. If the file does not exist, it will be created.",
             vec![
                 FunctionParameter::new("file_name", ParameterType::String),
                 FunctionParameter::new("content", ParameterType::String),
@@ -90,12 +90,11 @@ fn main() {
     );
 
     // Create the agent
-    let mut agent = Agent::new(&core, &mut environment, 0.5, vec![]);
+    let mut agent = Agent::new(&core, &mut environment, 0.4, vec![]);
 
     // Have them write the game
     let result = agent.run(
         &mut environment,
-        true,
         "Create a basic Python game with a ball bouncing around the screen at 60 FPS. \
         The ball should change color every time it bounces off the walls. \
         Comment your code appropriately.",
@@ -106,7 +105,6 @@ fn main() {
     // Have them then make an edit to the game
     let result = agent.run(
         &mut environment,
-        true,
         "Please edit my bouncing ball python game so that there's a particle effect whenever the ball bounces off a wall."
     );
 
@@ -115,8 +113,7 @@ fn main() {
     // Have them fix & refactor the game
     let result = agent.run(
         &mut environment,
-        true,
-        "Please fix and refactor the Python code for my bouncing ball game. Make sure there are no syntax errors."
+        "Please fix any bugs in the Python code for my bouncing ball game. Make sure there are no syntax errors."
     );
 
     dlog!(!"Finished editing!\nResult:\n{}", result);

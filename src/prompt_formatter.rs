@@ -56,9 +56,14 @@ impl PromptSection for ListSection {
     fn render(&self, data: &JsonMap) -> String {
         let mut render_string = String::new();
 
-        // If there is a preamble, render it first, substituting placeholders and replacing multiple newlines with a single newline to avoid breaking formatting
+        // If there is a preamble, render it first, substituting placeholders and replacing both "\n\n" and "---" with a single newline to avoid breaking formatting
         if let Some(preamble) = &self.preamble {
-            render_string.push_str(&substitute_placeholders(preamble, data).replace("\n\n", "\n"));
+            render_string.push_str(
+                &substitute_placeholders(preamble, data)
+                    .replace("\n\n", "\n")
+                    .replace("---", "\n")
+                    .replace("\n\n", "\n")
+            );
             render_string.push('\n');
         }
 
@@ -149,8 +154,8 @@ impl PromptSection for TextSection {
 
     fn render(&self, data: &JsonMap) -> String {
         substitute_placeholders(&self.content, data)
-                // Replace multiple consecutive newlines with a single newline to avoid breaking formatting
-                .replace("\n\n", "\n")
+                // Replace "---" with a single newline to avoid breaking formatting
+                .replace("---", "\n")
     }
 
     fn boxed_clone(&self) -> Box<dyn PromptSection> {
@@ -186,7 +191,7 @@ impl PromptFormatter {
                 None => s.render(data),
             })
             .collect::<Vec<_>>()
-            .join("\n\n")
+            .join("\n\n---\n\n")
     }
 
     /// Returns self with the given section added.

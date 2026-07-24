@@ -54,10 +54,10 @@ macro_rules! dlog {
 #[macro_export]
 macro_rules! wlog {
     // For warning messages that are important or cover many lines
-    (#!$($arg:tt)*) => {
+    (!$($arg:tt)*) => {
         if cfg!(debug_assertions) {
             use colored::Colorize;
-            println!("[{}] vvvvvvvvvv\n{}\n^^^^^^^^^^^^^^^", "DEBUG".bright_green().bold(), format!($($arg)*).green());
+            println!("[{}] vvvvvvvvvv\n{}\n^^^^^^^^^^^^^^^", "WARNING".bright_yellow().bold(), format!($($arg)*).yellow());
         }
     };
     // For regular warning messages

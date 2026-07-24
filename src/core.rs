@@ -1,15 +1,12 @@
-use std::{fmt::Display, num::NonZeroU32, path::Path};
+use std::{collections::HashMap, fmt::Display, num::NonZeroU32, path::Path};
 
 use llama_cpp_4::{
-    context::{LlamaContext, params::LlamaContextParams},
-    llama_backend::LlamaBackend,
-    model::{LlamaModel, params::LlamaModelParams},
-    quantize::GgmlType,
+    context::{LlamaContext, params::{LlamaContextParams, LlamaFlashAttnType}}, llama_backend::LlamaBackend, model::{LlamaModel, params::LlamaModelParams}, quantize::GgmlType,
 };
 use static_init::dynamic;
 
 use crate::{
-    chat::Chat, inference::Inference, pipeline::Pipeline, prompt_formatter::{ListSection, PromptFormatter, TextSection}, util::{JsonMap, JsonValue}, wlog,
+    agent::{Environment, Function}, chat::Chat, inference::Inference, pipeline::Pipeline, prompt_formatter::{ListSection, PromptFormatter, TextSection}, util::{JsonMap, JsonValue}, wlog,
 };
 
 #[dynamic]
@@ -59,7 +56,7 @@ impl Core {
     /// The `creativity` parameter controls the randomness of the generated output, with higher values resulting in more creative responses.
     pub fn infer<'a>(&'a self, creativity: f32, seed: Option<u32>, context_size: u32) -> Inference<'a> {
         let ctx_params = LlamaContextParams::default()
-            .with_flash_attention(true)
+            .with_flash_attn_type(LlamaFlashAttnType::Enabled)
             .with_n_ctx(Some(NonZeroU32::new(context_size).expect("context_size must be non-zero")))
             .with_n_batch(4096)
             .with_cache_type_k(match self.compression {
@@ -92,7 +89,7 @@ impl Core {
         seed: Option<u32>,
         context_size: Option<u32>,
     ) -> Chat<'_> {
-        Chat::new(self, system_prompt.to_string(), creativity, seed, context_size.unwrap_or(16384))
+        Chat::new(self, system_prompt.to_string(), creativity, seed, context_size.unwrap_or(65536))
     }
 
     /// Creates a new pipeline for summarizing text.
@@ -112,7 +109,7 @@ impl Core {
         }
 
         /// Defines the structure of the input.
-        fn summarization_input(formatter: PromptFormatter, inputs: &JsonMap) -> PromptFormatter {
+        fn summarization_input(formatter: PromptFormatter, inputs: &JsonMap) -> Option<PromptFormatter> {
             formatter.with_section(TextSection::new(
                 None,
                 format!(
@@ -120,6 +117,7 @@ impl Core {
                     inputs["input"]
                 ),
             ))
+            .into()
         }
 
         /// Defines the structure of the output.
@@ -173,10 +171,11 @@ impl Core {
         }
 
         /// Defines the structure of the input.
-        fn json_builder_input(formatter: PromptFormatter, inputs: &JsonMap) -> PromptFormatter {
+        fn json_builder_input(formatter: PromptFormatter, inputs: &JsonMap) -> Option<PromptFormatter> {
             formatter
                 .with_section(TextSection::new(Some("Template".to_string()), &inputs["template"]))
                 .with_section(TextSection::new(Some("Prompt".to_string()), &inputs["prompt"]))
+                .into()
         }
 
         /// Defines the structure of the output.
@@ -230,7 +229,7 @@ impl Core {
         }
 
         /// Defines the structure of the input.
-        fn multiple_choice_input(formatter: PromptFormatter, inputs: &JsonMap) -> PromptFormatter {
+        fn multiple_choice_input(formatter: PromptFormatter, inputs: &JsonMap) -> Option<PromptFormatter> {
             formatter
                 .with_section(TextSection::new(Some("Question".to_string()), &inputs["question"]))
                 // Split the options by '|', limit the number, and append the corresponding letters
@@ -247,6 +246,7 @@ impl Core {
                         .collect::<Vec<_>>()
                         .join(" | "),
                 ))
+                .into()
         }
 
         /// Defines the structure of the output.
@@ -341,7 +341,7 @@ Be creative, let every character have a chance to shine, and keep the story inte
         }
 
         /// Defines the structure of the input for the scene writer pipeline.
-        fn scene_writer_input(formatter: PromptFormatter, inputs: &JsonMap) -> PromptFormatter {
+        fn scene_writer_input(formatter: PromptFormatter, inputs: &JsonMap) -> Option<PromptFormatter> {
             // Get the controllable_characters from inputs
             let controllable_characters = inputs["controllable_characters"]
                 .as_array()
@@ -361,6 +361,7 @@ Be creative, let every character have a chance to shine, and keep the story inte
                     false,
                     controllable_characters,
                 ))
+                .into()
         }
 
         /// Defines the structure of the output.
@@ -504,7 +505,7 @@ Be creative, let every character have a chance to shine, and keep the story inte
         }
 
         /// Defines the structure of the input
-        fn turn_extractor_input(formatter: PromptFormatter, inputs: &JsonMap) -> PromptFormatter {
+        fn turn_extractor_input(formatter: PromptFormatter, inputs: &JsonMap) -> Option<PromptFormatter> {
             formatter
                 .with_section(TextSection::new(Some("Scene".to_string()), inputs["scene"].as_str().unwrap()))
                 .with_section(TextSection::new(
@@ -515,6 +516,7 @@ Be creative, let every character have a chance to shine, and keep the story inte
                     Some("Command".to_string()),
                     inputs["command"].as_str().unwrap(),
                 ))
+                .into()
         }
 
         /// Defines the structure of the output
@@ -580,6 +582,121 @@ Be creative, let every character have a chance to shine, and keep the story inte
             &[],
             None,
             use_reasoning,
+        )
+    }
+
+    /// Creates a new pipeline for agent turns. This pipeline can be used to simulate an agent that works within an environment of some type to complete tasks.
+    /// When starting a new task, the input hashmap should contain a "task" key with the task for the agent to complete.
+    /// If continuing the task, the input hashmap should omit the "task" key.
+    /// The function name for that turn will be provided under the "function_name" key in the output hashmap, and the arguments for that function will be provided under their names.
+    /// The agent will have access to a set of functions that it can call to interact with the environment.
+    pub fn new_agent_pipeline<'a, E: Environment>(&'a self, creativity: f32, functions: impl Into<Vec<Function<E>>>) -> Pipeline<'a> {
+        let functions = functions.into();
+
+        let function_jsons = functions
+            .iter()
+            .map(|f| serde_json::to_string_pretty(&f.to_json()).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        /// Defines the structure of the system prompt.
+        fn agent_system(formatter: PromptFormatter, function_jsons: &str) -> PromptFormatter {
+            formatter
+                .with_section(TextSection::new(
+                    Some("Your Role".to_string()),
+                    "You are an intelligent agent that can perform tasks in a virtual environment.\n\
+                    The user will provide you with a code block containing a task for you to perform. \
+                    You must complete said task using only the functions under \"Available Functions\" below. \
+                    Use exactly *one* function call per turn, and do not provide any other output.\n \
+                    Once the task is complete, respond with a function call to `finish` with the result of the task as the argument."
+                ))
+                .with_section(TextSection::new(
+                    Some("Available Functions".to_string()),
+                    format!(
+                        "You may call *one* of the available functions at a time to assist with the user query. \
+                        The available functions are listed below within <tools></tools> XML tags:\n\
+                        <tools>\n{}\n</tools>\n\n\
+                        You must call the functions exactly as they are defined, and you must provide arguments to all required parameters. \
+                        For each function call, output the function name and arguments within <function_call></function_call>, using the exact following XML format:
+<function_call>
+<function=example_function_name>
+<parameter=example_parameter_1>
+value_1
+</parameter>
+<parameter=example_parameter_2>
+This is the value for the second parameter
+that can span
+multiple lines
+</parameter>
+</function>
+</function_call>",
+                        function_jsons
+                    )
+                ))
+        }
+
+        /// Defines the structure of the input.
+        fn agent_input(formatter: PromptFormatter, inputs: &JsonMap) -> Option<PromptFormatter> {
+            // If the input contains a "task" key, include it in the prompt.
+            if let Some(task) = inputs.get("task") {
+                Some(formatter.with_section(TextSection::new(
+                    Some("Task".to_string()),
+                    format!("Please complete the following task:\n```\n{}\n```", task),
+                )))
+            }
+            // If the input does not contain a "task" key, return None to not pass a user prompt to the model. This will allow the model to continue the task from the previous turn.
+            else {
+                None
+            }
+        }
+
+        /// Defines the structure of the output.
+        fn agent_output(inference: &mut Inference, _inputs: &JsonMap, function_params: &HashMap<String, Vec<String>>) {
+            // Begin by pushing the function call XML tag and beginning the function tag. The function name will be inferred by the model.
+            inference.push_text("<function_call>\n<function=");
+
+            // Infer the function name and closing bracket for the function tag.
+            let function_name = inference.infer_output("function_name", &[">"], false).as_str().unwrap_or_default().to_string();
+            
+            // Newline after tag
+            inference.push_text("\n");
+
+            // If the function exists, loop over its parameters and infer those
+            if let Some(function_params) = function_params.get(&function_name) {
+                // Loop over the parameters and infer each one
+                for param_name in function_params {
+                    
+                    // Push the parameter tag
+                    inference.push_text(&format!("<parameter={}>\n", param_name));
+
+                    // Infer the parameter with JSON parsing and close the parameter tag
+                    inference.infer_output(param_name, &["</parameter>"], true);
+
+                    // Newline after closing tag
+                    inference.push_text(&format!("\n"));
+                }
+            }
+
+            // Close the function and function call tags
+            inference.push_text("</function>\n</function_call>");
+        }
+
+        let function_params = functions
+            .iter()
+            .map(|f| (f.name.clone(), f.parameters.iter().map(|p| p.name.clone()).collect::<Vec<_>>()))
+            .collect::<HashMap<_, _>>();
+
+        // Create the pipeline
+        Pipeline::new(
+            self,
+            creativity,
+            true,
+            move |formatter| agent_system(formatter, &function_jsons),
+            agent_input,
+            move |inference, inputs| agent_output(inference, inputs, &function_params),
+            &[],
+            Some(131072),
+            true,
         )
     }
 }

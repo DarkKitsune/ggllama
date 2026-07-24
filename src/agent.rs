@@ -6,7 +6,7 @@ use anyhow::Result;
 use serde_json::Map;
 
 use crate::{
-    chat::{Chat, ChatCheckpoint, ChatRole}, core::Core, dlog, map, prompt_formatter::{PromptFormatter, TextSection}, wlog,
+    chat::{ChatCheckpoint, ChatRole}, core::Core, dlog, map, pipeline::Pipeline, wlog,
 };
 
 /// A capability that an agent can have, which can be used to determine what the agent is allowed to do.
@@ -14,6 +14,7 @@ use crate::{
 pub enum Capability {
     Python,
     Rust,
+    JavaScript,
     FileWrite,
     FileExecute,
     Other(String),
@@ -26,6 +27,7 @@ impl Display for Capability {
             Capability::Rust => write!(f, "working with Rust code"),
             Capability::FileWrite => write!(f, "modifying files"),
             Capability::FileExecute => write!(f, "executing files"),
+            Capability::JavaScript => write!(f, "working with JavaScript code and Node.js"),
             Capability::Other(s) => write!(f, "{}", s),
         }
     }
@@ -283,13 +285,13 @@ pub trait Environment: Sized {
             .collect()
     }
 
-    /// Gets the functions which an agent with the given capabilities is allowed to execute in this environment, plus the "exit" function.
-    fn get_allowed_functions_with_exit(&self, capabilities: &[Capability]) -> Vec<Function<Self>> {
-        // Get the allowed functions for the agent's capabilities and add the "exit" function.
+    /// Gets the functions which an agent with the given capabilities is allowed to execute in this environment, plus the "finish" function.
+    fn get_allowed_functions_with_finish(&self, capabilities: &[Capability]) -> Vec<Function<Self>> {
+        // Get the allowed functions for the agent's capabilities and add the "finish" function.
         let mut functions = self.get_allowed_functions(capabilities);
         functions.push(Function::new(
-            "exit",
-            "Exits the current task with the given result or summary.",
+            "finish",
+            "Finishes the current task with the given result or summary.",
             vec![FunctionParameter {
                 name: "result".to_string(),
                 param_type: ParameterType::String,
@@ -373,7 +375,7 @@ impl<T> Environment for BasicEnvironment<T> {
 /// A general purpose agent that can be used to perform various tasks or act out a role.
 /// The agent can be configured with an environment, a set of capabilities which define its capabilities, and a task.
 pub struct Agent<'a, E: Environment> {
-    chat: Chat<'a>,
+    pipeline: Pipeline<'a>,
     checkpoint: ChatCheckpoint,
     capabilities: Vec<Capability>,
     _phantom: PhantomData<E>,
@@ -382,64 +384,14 @@ pub struct Agent<'a, E: Environment> {
 impl<'a, E: Environment> Agent<'a, E> {
     /// Creates a new agent with capabilities in the given environment.
     pub fn new(core: &'a Core, environment: &E, creativity: f32, capabilities: Vec<Capability>) -> Self {
-        // Create the system prompt
-        let system_prompt = PromptFormatter::new()
-            // Describe the agent's role
-            .with_section(TextSection::new(
-                None,
-                "You are an expert agent who is knowledgeable in many areas including programming, writing, and math.\n\
-                The user will give you a task labeled \"Task\" which you should complete by using the available functions in \"Functions\".\n\
-                Think about a problem step-by-step, but do *not* think for too many sentences. **Come to the solution quickly and concisely**.\n\
-                After each step you take towards completing the task, plan ahead and think about which steps to take next.\n\
-                Once you have completed the task, you should call the \"exit\" function with a very short and concise summary of what you did to complete \
-                the task, including changes to the environment. If you are unable to complete the task with the available functions, \
-                you should call the \"exit\" function with the reason why you were unable to complete the task.\n\
-                A function may return an error in a JSON field called \"error\", in which case you should adjust your plan and try again using that information.\n\
-                If you write code, make sure it is **formatted**, **organized into separate modules/files**, **well-commented** and **intuitive**.",
-            ))
-            // Describe the environment
-            .with_section(TextSection::new(
-                Some("Environment".to_string()),
-                environment.environment_prompt(),
-            ))
-            // List the available functions
-            .with_section(TextSection::new(
-                Some("Functions".to_string()),
-                format!(
-                    "You must call exactly **one** function per response to assist with the user's query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n\
-                    <tools>\n```json\n{}\n```\n</tools>\n\n\
-                    A function call must be placed between <function_call> and </function_call> XML tags. For example:
-<function_call>
-{{
-    \"name\": \"exit\",
-    \"arguments\": {{
-        \"result\": \"Fixed the issue with user input by:\\n\
-        - Validating the input to ensure it is a number.\\n\
-        - Adding error handling to catch any exceptions.\\n\
-        - Running tests to verify the fix.\"
-    }}
-}}
-</function_call>\n\n\
-                    Once you have completed what the user asked for, you should call the \"exit\" function with a very short and concise summary of what you did to complete \
-                    the task the user asked for, or to retrieve the information that the user requested. Mention any and all changes you made.",
-                    environment.get_allowed_functions(&capabilities)
-                        .iter()
-                        .map(|f| serde_json::to_string_pretty(&f.to_json()).unwrap())
-                        .collect::<Vec<_>>()
-                        .join("\n\n")
-                ),
-            ));
+        // Create an agent pipeline
+        let mut pipeline = core.new_agent_pipeline(creativity, environment.get_allowed_functions(&capabilities));
 
-        // Log the system prompt for debugging purposes
-        dlog!("System Prompt:\n{}", system_prompt);
-
-        // Start the chat with the system prompt
-        let mut chat = core.start_chat(system_prompt, creativity, None, Some(65536));
-
-        let checkpoint = chat.create_checkpoint();
+        // Get a checkpoint of the pipeline's chat so that we can reset it after each run.
+        let checkpoint = pipeline.chat_mut().create_checkpoint();
 
         Self {
-            chat,
+            pipeline,
             checkpoint,
             capabilities,
             _phantom: PhantomData,
@@ -450,121 +402,85 @@ impl<'a, E: Environment> Agent<'a, E> {
     pub fn run(
         &mut self,
         environment: &mut E,
-        use_reasoning: bool,
         task: impl AsRef<str>,
     ) -> serde_json::Value {
         let task = task.as_ref().to_string();
 
-        // Create the user prompt with the task and available functions
-        let user_prompt = PromptFormatter::new()
-            // Describe the task
-            .with_section(TextSection::new(
-                None,
-                task,
-            ));
+        // Agent loop
+        let mut first_iteration = true;
+        let result = loop {
+            // If this is the first iteration, we include the task in the inputs
+            let inputs = if first_iteration {
+                first_iteration = false;
 
-        // Push the user prompt to the chat
-        self.chat.push_message(ChatRole::User, user_prompt);
-
-        let mut last_function_call = None;
-        let task_result = loop {
-            // Create a checkpoint here in case the assistant messes up
-            let checkpoint = self.chat.create_checkpoint();
-
-            // Infer the next response from the agent
-            let response = self.chat.infer_response(None, &[], None, use_reasoning);
-
-            // If there was no function call then push an error message to the chat and continue the loop
-            if response.function_call.is_none() {
-                wlog!("No function call detected in the agent's response: {:#?}.", response);
-                self.chat.push_message(
-                    ChatRole::Function,
-                    serde_json::to_string_pretty(&map! {
-                        "error" => "No function call detected in the agent's response, or the function call was malformed. \
-                        Please make sure to call exactly one function in each response, using JSON, between <function_call> \
-                        and </function_call> XML tags.",
-                    })
-                    .unwrap(),
-                );
-                continue;
-            }
-            // Otherwise log it for debugging purposes
-            else {
-                let function_call = response.function_call.as_ref().unwrap();
-                if function_call.name != "exit" {
-                    dlog!("Function call:\n{:#?}", function_call);
+                map! {
+                    "task" => task.clone(),
                 }
+            } else {
+                map! {}
+            };
+
+            // Run the pipeline with the inputs
+            let mut outputs = self.pipeline.run(&inputs);
+
+            // Get the chat from the pipeline to feed errors and tool results back into the agent
+            let chat = self.pipeline.chat_mut();
+            
+            // Validate the output function call
+            let function_name = outputs
+                .get("function_name")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string();
+
+            // Remove the function name from the outputs so that it contains only the arguments for the function call
+            outputs.remove("function_name");
+            let arguments = outputs;
+
+            // If the function is "finish", return
+            if function_name == "finish" {
+                break serde_json::Value::Object(arguments);
             }
 
-            // If there was a function call then execute it
-            if let Some(function_call) = response.function_call {
-                // If this is an exact duplicate function call, then it is likely that the agent is stuck in a loop, so revert to the checkpoint
-                if Some(&function_call) == last_function_call.as_ref() {
-                    wlog!("Agent may be stuck in a loop with the same function call, reverting to last checkpoint once.");
-                    last_function_call = None;
-                    self.chat.restore_checkpoint(checkpoint);
-                    continue;
-                }
+            // Log the function name
+            dlog!("Agent tried calling function: {}", function_name);
 
-                // If this was a call to "exit" then break the loop with the result
-                if function_call.name == "exit" {
-                    // If there is only a "result" argument then return it, otherwise return all arguments
-                    break if function_call.arguments.len() == 1
-                        && function_call.arguments.contains_key("result")
-                    {
-                        Some(function_call.arguments["result"].clone())
-                    } else {
-                        Some(serde_json::to_value(&function_call.arguments).unwrap())
+            // Execute the function in the environment
+            let function_result = environment.execute_function(
+                &self.capabilities,
+                &function_name,
+                &arguments,
+            );
+
+            // If the function execution failed, feed the error back into the agent and continue
+            match function_result {
+                Ok(result) => {
+                    // Feed the result back into the agent
+                    let result_json = match result {
+                        FunctionResult::Ok(map) => serde_json::Value::Object(map),
+                        FunctionResult::Err(message) => serde_json::json!({
+                            "error": message,
+                        }),
                     };
+
+                    // Push the function result to the chat
+                    chat.push_message(ChatRole::System, serde_json::to_string(&result_json).unwrap());
                 }
-
-                // Execute the function call in the environment and get the result
-                let result = environment.execute_function(
-                    &self.capabilities,
-                    &function_call.name,
-                    &function_call.arguments,
-                );
-
-                // Record the last function call, for the purpose of avoiding loops
-                last_function_call = Some(function_call.clone());
-
-                // If the function call failed, push an error message to the chat and continue the loop, otherwise push the function result to the chat
-                let result = match result {
-                    Err(e) => {
-                        wlog!(
-                            "Error executing function '{}': {}",
-                            function_call.name,
-                            e
-                        );
-
-                        // Push an error message to the chat
-                        self.chat.push_message(
-                            ChatRole::Function,
-                            serde_json::to_string_pretty(&map! {
-                                "error" => format!("Error executing function '{}': {}", function_call.name, e),
-                            })
-                            .unwrap(),
-                        );
-                        continue;
-                    }
-                    Ok(inner_result) => inner_result,
-                };
-
-                // Construct a function response from the result
-                let response_string = match result {
-                    FunctionResult::Ok(value) => serde_json::to_string_pretty(&value).unwrap(),
-                    FunctionResult::Err(err) => {
-                        serde_json::to_string_pretty(&map! { "error" => err }).unwrap()
-                    }
-                };
-
-                self.chat.push_message(ChatRole::Function, response_string);
+                Err(e) => {
+                    // Log the error and feed it back into the agent
+                    wlog!("Error executing function '{}': {}", function_name, e);
+                    let error_json = serde_json::json!({
+                        "error": e.to_string(),
+                    });
+                    chat.push_message(ChatRole::System, serde_json::to_string(&error_json).unwrap());
+                }
             }
         };
 
-        // Reset the chat to before this run
-        self.chat.restore_checkpoint(self.checkpoint.clone());
+        // Reset the chat to the checkpoint so that the agent can be run again without retaining memory of old operations.
+        self.pipeline.chat_mut().restore_checkpoint(self.checkpoint.clone());
 
-        task_result.unwrap()
+        result
     }
 }

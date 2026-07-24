@@ -16,29 +16,29 @@ use crate::{
 };
 
 const BATCH_CAPACITY: usize = 4096;
-const CREATIVITY_NUDGE_DOWN_EVERY_N: usize = 768; // Every N tokens, we nudge the creativity down towards 0.0 for stability over long contexts.
+const CREATIVITY_NUDGE_DOWN_EVERY_N: usize = 4096; // Every N tokens, we nudge the creativity down towards 0.0 for stability over long contexts.
 /// Higher = creativity adapts downwards slower.
-const CREATIVITY_DOWN_DIVISOR: f32 = 4.0;
+const CREATIVITY_DOWN_DIVISOR: f32 = 7.0;
 /// Higher = creativity adapts upwards slower.
-const CREATIVITY_UP_DIVISOR: f32 = 3.0;
+const CREATIVITY_UP_DIVISOR: f32 = 4.0;
 /// When restoring a checkpoint, creativity is temporarily raised then reduced again after this many tokens.
 /// This is to encourage creativity and avoid the model getting stuck in a loop of repeating the same output after restoring a checkpoint.
-const CHECKPOINT_RESTORE_CREATIVITY_GRACE: usize = 16;
+const CHECKPOINT_RESTORE_CREATIVITY_GRACE: usize = 24;
 
 /// Helper function to create a new sampler.
 fn new_sampler(creativity: f32, seed: u32) -> LlamaSampler {
     // Clamp creativity
     let creativity = creativity.clamp(0.0, 1.0);
 
-    // Calculate a safe minimum probability based on creativity
-    let min_probability = creativity * 0.05 + 0.1;
+    // Calculate a mininum probability based on creativity
+    let min_probability = 0.1 + (1.0 - creativity.sqrt()) * 0.6; // 0.7 at creativity 0.0, 0.1 at creativity 1.0
 
     // Calculate a probability target based on creativity
     // If creativity is very close zero then set target to -1.0 as this makes the adaptive_p sampler a no-op
     let target_probability = if creativity < 0.0001 {
         -1.0
     } else {
-        1.0 - creativity * 0.5
+        1.0 - creativity.sqrt() * 0.5
     };
 
     // Create adaptive sampler which only samples tokens that aren't very unlikely

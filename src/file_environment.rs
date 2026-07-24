@@ -51,7 +51,7 @@ impl DirectoryEnvironment {
     }
 
     /// Gets the files in the directory pointed to by the given path within the directory wrapped by this environment.
-    pub fn get_files(&self, dir_path: impl AsRef<Path>, recursive: bool) -> Vec<PathBuf> {
+    pub fn get_files(&self, dir_path: impl AsRef<Path>, recursive: bool, include_directories: bool) -> Vec<PathBuf> {
         // Join the directory path with the base path and then get the absolute path
         let full_path = self.path.join(&dir_path);
         let full_path = absolute(&full_path)
@@ -71,16 +71,25 @@ impl DirectoryEnvironment {
             for entry in entries.flatten() {
                 let path = entry.path();
 
+                // Skip hidden files and directories (those starting with a dot)
+                if let Some(file_name) = path.file_name() {
+                    if file_name.to_string_lossy().starts_with('.') {
+                        continue;
+                    }
+                }
+
                 // Skip the protected environment.json file
                 if path.file_name().map(|n| n.to_string_lossy()) == Some("environment.json".into()) {
                     continue;
                 }
 
-                if path.is_file() {
+                if path.is_file() || (include_directories && path.is_dir()) {
                     files.push(path.strip_prefix(&self.path).unwrap().to_path_buf());
-                } else if recursive && path.is_dir() {
+                }
+                // If recursive is true and the path is a directory, *and the directory is not named "target", recursively get files in that directory
+                if recursive && path.is_dir() && path.file_name().map(|n| n.to_string_lossy()) != Some("target".into()) {
                     let relative_path = path.strip_prefix(&self.path).unwrap();
-                    files.extend(self.get_files(relative_path, true));
+                    files.extend(self.get_files(relative_path, true, include_directories));
                 }
             }
         }
@@ -89,8 +98,8 @@ impl DirectoryEnvironment {
     }
 
     /// Gets all files in the root of the directory wrapped by this environment.
-    pub fn get_all_files(&self) -> Vec<PathBuf> {
-        self.get_files(".", true)
+    pub fn get_all_files_and_directories(&self) -> Vec<PathBuf> {
+        self.get_files(".", true, true)
     }
 
     /// Reads the contents of a file in the directory wrapped by this environment.
@@ -165,6 +174,54 @@ impl DirectoryEnvironment {
         Ok(())
     }
 
+    /// Edits a file in the directory wrapped by this environment by replacing the first occurrence of a target substring with a new substring.
+    pub fn edit_file(
+        &mut self,
+        file_path: impl AsRef<Path>,
+        target: &str,
+        replacement: &str,
+    ) -> Result<()> {
+        let contents = self.read_file(&file_path)?;
+        if let Some(_) = contents.find(target) {
+            let new_contents = contents.replacen(target, replacement, 1);
+            self.write_file(file_path, &new_contents)?;
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "Target substring not found in file \"{}\"",
+                file_path.as_ref().display()
+            ))
+        }
+    }
+
+    /// Edits a file by replacing the text between the start and end lines with the given replacement text. The start and end lines are inclusive and are 1-indexed.
+    pub fn edit_file_between_lines(
+        &mut self,
+        file_path: impl AsRef<Path>,
+        start_line: usize,
+        end_line: usize,
+        replacement: &str,
+    ) -> Result<()> {
+        let contents = self.read_file(&file_path)?;
+        let mut lines: Vec<&str> = contents.lines().collect();
+        if start_line == 0 || end_line > lines.len() || start_line > end_line {
+            return Err(anyhow::anyhow!(
+                "Invalid line range: {}-{} for file \"{}\" with {} lines",
+                start_line,
+                end_line,
+                file_path.as_ref().display(),
+                lines.len()
+            ));
+        }
+
+        // Replace the lines between start_line and end_line (inclusive) with the replacement text.
+        lines.splice((start_line - 1)..end_line, replacement.lines());
+
+        let new_contents = lines.join("\n");
+        self.write_file(file_path, &new_contents)?;
+        Ok(())
+    }
+
     /// Runs a Python script in the directory wrapped by this environment and returns the output.
     pub fn run_python(&self, file_path: impl AsRef<Path>) -> Result<String> {
         let full_path = self.path.join(&file_path);
@@ -234,11 +291,52 @@ impl DirectoryEnvironment {
             ))
         }
     }
+
+    /// Runs NPM commands in the directory wrapped by this environment and returns the output.
+    pub fn run_npm_command(&self, args: &[&str]) -> Result<String> {
+        // If the first argument is one that requires a package.json file, ensure it exists.
+        if ["install", "ci", "publish", "link", "unlink", "update", "uninstall"].contains(&args.get(0).unwrap_or(&"")) {
+            let package_json_path = self.path.join("package.json");
+            if !package_json_path.exists() {
+                return Err(anyhow::anyhow!(
+                    "Attempted to run `npm {}` but package.json does not exist in the directory: {}",
+                    args.get(0).unwrap_or(&""),
+                    package_json_path.display()
+                ));
+            }
+        }
+
+        // Also if there is a package.json file, ensure that the first argument is not "init" or "create" since those commands would overwrite the existing package.json file.
+        let package_json_path = self.path.join("package.json");
+        if package_json_path.exists() && ["init", "create"].contains(&args.get(0).unwrap_or(&"")) {
+            return Err(anyhow::anyhow!(
+                "Attempted to run `npm {}` but package.json already exists in the directory: {}",
+                args.get(0).unwrap_or(&""),
+                package_json_path.display()
+            ));
+        }
+
+        // Run the NPM command in the directory wrapped by this environment and return the output.
+        let output = std::process::Command::new("npm")
+            .args(args)
+            .current_dir(&self.path)
+            .output()
+            .map_err(|e| anyhow::anyhow!("Failed to execute `npm`: {}", e))?;
+
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        } else {
+            Err(anyhow::anyhow!(
+                "NPM command failed.\n\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
+        }
+    }
 }
 
 impl Environment for DirectoryEnvironment {
     fn environment_prompt(&self) -> String {
-        let files = self.get_all_files();
+        let files = self.get_all_files_and_directories();
         if files.is_empty() {
             format!(
                 "The environment is a directory in a file system.\n\
@@ -263,20 +361,20 @@ impl Environment for DirectoryEnvironment {
             // Function to get files in a given relative path within the environment directory.
             Function::new(
                 "get_files",
-                "Gets all files in the environment directory and all of its subdirectories, recursively. \
-                Returns a list of file paths relative to the environment directory.",
+                "Gets all files and subdirectories in the environment directory and all of its subdirectories, recursively, \
+                and returns them as a list of paths relative to the environment directory.",
                 vec![],
                 vec![],
                 |env: &mut DirectoryEnvironment, _args: &JsonMap| {
                     Ok(map! {
-                        "files" => env.get_all_files()
+                        "files" => env.get_all_files_and_directories()
                     })
                 },
             ),
             // Function to read the contents of a file in the environment directory.
             Function::new(
                 "read_file",
-                "Reads the contents of a file in the environment directory. Use a relative path within the environment directory.",
+                "Reads the contents of the file under `relative_path` in the environment directory.",
                 vec![FunctionParameter::new(
                     "relative_path",
                     ParameterType::String,
@@ -296,10 +394,10 @@ impl Environment for DirectoryEnvironment {
             // Function to write contents to a file in the environment directory.
             Function::new(
                 "write_file",
-                "Writes contents to a file in the environment directory. Use a relative path within the environment directory.",
+                "Writes `content` to the text file under `relative_path` in the environment directory.",
                 vec![
                     FunctionParameter::new("relative_path", ParameterType::String),
-                    FunctionParameter::new("contents", ParameterType::String),
+                    FunctionParameter::new("content", ParameterType::String),
                 ],
                 vec![
                     Capability::FileWrite,
@@ -311,10 +409,10 @@ impl Environment for DirectoryEnvironment {
                         .as_str()
                         .ok_or(anyhow::anyhow!("Argument 'relative_path' is not a string"))?;
                     let contents = args
-                        .get("contents")
-                        .ok_or(anyhow::anyhow!("Missing argument: contents"))?
+                        .get("content")
+                        .ok_or(anyhow::anyhow!("Missing argument: content"))?
                         .as_str()
-                        .ok_or(anyhow::anyhow!("Argument 'contents' is not a string"))?;
+                        .ok_or(anyhow::anyhow!("Argument 'content' is not a string"))?;
                     env.write_file(file_path, contents)?;
                     Ok(map! {
                         "status" => "success"
@@ -324,8 +422,8 @@ impl Environment for DirectoryEnvironment {
             // Function to replace a substring in a file in the environment directory with a new substring.
             Function::new(
                 "edit_file",
-                "Replaces the first occurrence of a target substring in a file in the environment directory with a new substring. \
-                The provided path should be a relative path within the environment directory.",
+                "Replaces the first occurrence of `target` with `replacement` in the file under `relative_path`. \
+                Use this function instead of `write_file` if you want to make a small edit to a file rather than overwriting its entire contents.",
                 vec![
                     FunctionParameter::new("relative_path", ParameterType::String),
                     FunctionParameter::new("target", ParameterType::String),
@@ -353,29 +451,24 @@ impl Environment for DirectoryEnvironment {
                         .ok_or(anyhow::anyhow!("Argument 'replacement' is not a string"))?
                         .to_string();
 
-                    // Read the file contents, replace the target with the replacement, and write the new contents back to the file
-                    let contents = env.read_file(file_path)?;
-                    if let Some(_) = contents.find(&target) {
-                        let new_contents = contents.replacen(&target, &replacement, 1);
-                        env.write_file(file_path, &new_contents)?;
-                        Ok(map! {
+                    let result = env.edit_file(file_path, &target, &replacement);
+                    match result {
+                        Ok(_) => Ok(map! {
                             "status" => "success",
                             "message" => format!("Replaced first occurrence in file \"{}\"", file_path)
-                        })
-                    } else {
-                        Ok(map! {
+                        }),
+                        Err(e) => Ok(map! {
                             "status" => "failure",
-                            "message" => format!("Target substring not found in file \"{}\"", file_path)
-                        })
+                            "message" => e.to_string()
+                        }),
                     }
                 },
             ),
-
             // Function to run a Python script in the environment directory.
             Function::new(
                 "run_python",
-                "Runs a Python script in the environment directory. Use a relative path within the environment directory. \
-                Returns the output of the script.",
+                "Runs the Python script under `relative_path` in the environment directory. \
+                On success, returns the output of the script from stdout. If an error occurs, returns the error message instead.",
                 vec![
                     FunctionParameter::new("relative_path", ParameterType::String),
                 ],
@@ -407,7 +500,7 @@ impl Environment for DirectoryEnvironment {
             // Function to initialize a cargo project in the environment directory with a given name, version, and description.
             Function::new(
                 "init_cargo_project",
-                "Initializes a cargo project in the environment directory with the given name, version, and description. \
+                "Initializes a cargo project in the environment directory with the given `name` and `version`. \
                 This will create a Cargo.toml file and a src/main.rs file with a simple \"Hello, world!\" program.",
                 vec![
                     FunctionParameter::new("name", ParameterType::String),
@@ -447,6 +540,43 @@ impl Environment for DirectoryEnvironment {
                 ],
                 |env: &mut DirectoryEnvironment, _args: &JsonMap| {
                     let result = env.run_cargo_project();
+
+                    match result {
+                        Ok(output) => Ok(map! {
+                            "output" => output,
+                            "status" => "success"
+                        }),
+                        Err(e) => Ok(map! {
+                            "error" => e.to_string(),
+                            "status" => "error"
+                        }),
+                    }
+                },
+            ),
+            // Function to run an NPM command in the environment directory.
+            Function::new(
+                "run_npm_command",
+                "Runs the given NPM command in the environment directory and returns the output (or stderr if an error occurs). \
+                This assumes that the environment directory is a valid NPM project with a package.json file.",
+                vec![
+                    FunctionParameter::new("args", ParameterType::Array),
+                ],
+                vec![
+                    Capability::JavaScript,
+                    Capability::FileWrite,
+                    Capability::FileExecute,
+                ],
+                |env: &mut DirectoryEnvironment, args: &JsonMap| {
+                    let args_str = args
+                        .get("args")
+                        .ok_or(anyhow::anyhow!("Missing argument: args"))?
+                        .as_array()
+                        .ok_or(anyhow::anyhow!("Argument 'args' is not an array"))?
+                        .iter()
+                        .map(|v| v.as_str().ok_or(anyhow::anyhow!("Argument 'args' contains a non-string value")).map(|s| s.to_string()))
+                        .collect::<Result<Vec<String>>>()?;
+                    let args_ref: Vec<&str> = args_str.iter().map(|s| s.as_str()).collect();
+                    let result = env.run_npm_command(&args_ref);
 
                     match result {
                         Ok(output) => Ok(map! {

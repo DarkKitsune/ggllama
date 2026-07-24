@@ -1,13 +1,10 @@
 use std::fmt::{Debug, Display};
 
-use serde_json::Map;
-
 use crate::{
     core::Core,
     inference::{Inference, InferenceCheckpoint},
     map,
     util::JsonMap,
-    wlog,
 };
 
 /// The chat compacts its own context if it exceeds this many tokens
@@ -27,7 +24,6 @@ pub struct ChatCheckpoint {
 pub struct ChatResponse {
     pub content: String,
     pub reasoning: Option<String>,
-    pub function_call: Option<FunctionCall>,
     pub encountered_stop_sequence: Option<String>,
     pub inference_tokens_per_second: f32,
     pub prefill_tokens_per_second: f32,
@@ -40,31 +36,6 @@ pub enum ChatRole {
     User,
     Assistant,
     Function,
-}
-
-/// Represents a call to a function, usually emitted by the assistant in a chat.
-#[derive(Clone, PartialEq, Eq, Hash)]
-pub struct FunctionCall {
-    /// The name of the function being called.
-    pub name: String,
-    /// The arguments for the function call.
-    pub arguments: Map<String, serde_json::Value>,
-}
-
-impl Debug for FunctionCall {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Format the function call as "function_name({arg1: value1, arg2: value2})"
-        write!(
-            f,
-            "{}({})",
-            self.name,
-            self.arguments
-                .iter()
-                .map(|(k, v)| format!("{}: {}", k, v))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    }
 }
 
 /// Represents a single message in a chat.
@@ -195,123 +166,21 @@ impl<'a> Chat<'a> {
         prefix: Option<String>,
         use_reasoning: bool,
     ) -> ChatResponse {
+        let context_size_limit = self.context_size_limit as usize;
+        
         self.infer_response_ext(use_reasoning, |inference, reasoning| {
             // Begin the message with the prefix, if any
             if let Some(prefix) = &prefix {
                 inference.push_text(prefix);
             }
 
-            // Use checkpointing and a loop to validate responses and regenerate if necessary
-            let checkpoint = inference.create_checkpoint();
-            let (response, content, function_call) = loop {
-                // Infer the response until one of the stop sequences is encountered
-                let response = inference.infer(max_tokens, stop_sequences);
-
-                // Trim the response content
-                let mut content = response.content_without_stop_sequence().trim().to_string();
-
-                // Parse the function calls from the response, until no more are found
-                let mut function_call = None;
-                if let Some(parse_begin) = content.find("<function_call>")
-                    && let Some(parse_end) = content.find("</function_call>").or_else(|| {
-                        // If content ends with } then assume the function call JSON might be complete and use the end of the content as the parse_end
-                        if content.ends_with('}') {
-                            Some(content.len())
-                        } else {
-                            None
-                        }
-                    })
-                {
-                    // Get just the text between the tags
-                    let function_call_str =
-                        &content[(parse_begin + "<function_call>".len())..parse_end];
-
-                    // Parse the function call JSON
-                    let mut function_call_json: Result<Map<_, _>, _> =
-                        serde_json::from_str(function_call_str);
-
-                    // If the JSON fails to parse, add a } and try to parse again (in case there is a missing brace at the end)
-                    if function_call_json.is_err() {
-                        let mut function_call_str_fixed = function_call_str.to_string();
-                        function_call_str_fixed.push('}');
-                        function_call_json = serde_json::from_str(&function_call_str_fixed);
-
-                        // If it still fails, trim and check if it ends with a }, and if so then remove it and try again (in case there were too many braces)
-                        if function_call_json.is_err() {
-                            let mut function_call_str_fixed = function_call_str.trim().to_string();
-                            if function_call_str_fixed.ends_with('}') {
-                                function_call_str_fixed.pop();
-                            }
-                            function_call_json = serde_json::from_str(&function_call_str_fixed);
-
-                            // If it still fails, try fixing trailing commas
-                            if function_call_json.is_err() {
-                                let mut function_call_str_pop = function_call_str.trim().to_string();
-                                if function_call_str_pop.ends_with('}') {
-                                    function_call_str_pop.pop();
-                                    function_call_str_pop = function_call_str_pop.trim_end().to_string();
-                                    if function_call_str_pop.ends_with('}') {
-                                        function_call_str_pop.pop();
-                                        function_call_str_pop = function_call_str_pop.trim_end().to_string();
-                                        if function_call_str_pop.ends_with(',') {
-                                            function_call_str_pop.pop();
-                                            function_call_str_pop.push_str("}}");
-                                            function_call_json = serde_json::from_str(&function_call_str_pop);
-                                        }
-                                    }
-                                    else if function_call_str_pop.ends_with(',') {
-                                        function_call_str_pop.pop();
-                                        function_call_str_pop.push_str("}");
-                                        function_call_json = serde_json::from_str(&function_call_str_pop);
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // If the JSON still fails to parse, log a warning, restore the checkpoint, and continue the loop
-                    if let Err(e) = &function_call_json {
-                        wlog!("Failed to parse function call JSON:\n{}\n\nError:\n{}", function_call_str, e);
-                        inference.restore_checkpoint(checkpoint.clone());
-                        continue;
-                    }
-                    let function_call_json = function_call_json.unwrap();
-
-                    // Construct the FunctionCall struct from the parsed JSON
-                    function_call = Some(FunctionCall {
-                        name: function_call_json
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or_default()
-                            .to_string(),
-                        arguments: function_call_json
-                            .get("arguments")
-                            .and_then(|v| v.as_object())
-                            .cloned()
-                            .unwrap_or_default(),
-                    });
-
-                    // Remove the range from the content
-                    content.replace_range(
-                        parse_begin
-                            ..(parse_end
-                                + if content.contains("</function_call>") {
-                                    "</function_call>".len()
-                                } else {
-                                    0
-                                }),
-                        "",
-                    );
-                    content = content.trim().to_string();
-                }
-
-                break (response, content, function_call);
-            };
+            // Infer the response until one of the stop sequences is encountered
+            let response = inference.infer(Some(max_tokens.unwrap_or(context_size_limit / 2)), &stop_sequences);
+            let content = response.content_without_stop_sequence().trim().to_string();
 
             ChatResponse {
                 content,
                 reasoning,
-                function_call,
                 encountered_stop_sequence: response.encountered_stop_sequence,
                 inference_tokens_per_second: response.inference_tokens_per_second,
                 prefill_tokens_per_second: response.prefill_tokens_per_second,
@@ -345,10 +214,10 @@ impl<'a> Chat<'a> {
         self.inference.supply_outputs_for_response(map);
     }
 
-    /// Compacts the chat context if it exceeds half the context size limit.
+    /// Compacts the chat context if it exceeds two-thirds of the context size limit.
     /// This works by taking the first half of the chat's messages, summarizing them, then inserting the summary back into the context.
     pub(crate) fn compact_context(&mut self) {
-        if self.inference.context_len() > self.context_size_limit as usize / 2 {
+        if self.inference.context_len() > (self.context_size_limit as f32 * (2.0 / 3.0)) as usize {
             // Get the first half of the chat's messages to summarize
             let half = self.all_messages.len() / 2;
 
@@ -357,11 +226,10 @@ impl<'a> Chat<'a> {
                 return;
             }
 
-            // Collect the non-system messages to summarize
+            // Collect messages to summarize
             let messages_to_summarize = self
                 .all_messages
                 .drain(0..half)
-                .filter(|m| m.role != ChatRole::System)
                 .collect::<Vec<_>>();
 
             // Exit early if there are no messages to summarize

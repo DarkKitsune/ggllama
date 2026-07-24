@@ -9,7 +9,7 @@ use crate::{
 /// A pipeline defines a set of inputs and outputs and the processing logic that transforms the inputs into the outputs.
 pub struct Pipeline<'a> {
     chat: Chat<'a>,
-    input_fn: Box<dyn FnMut(PromptFormatter, &JsonMap) -> PromptFormatter>,
+    input_fn: Box<dyn FnMut(PromptFormatter, &JsonMap) -> Option<PromptFormatter>>,
     output_fn: Box<dyn FnMut(&mut Inference, &JsonMap)>,
     restore_checkpoint: Option<ChatCheckpoint>,
     has_run: bool,
@@ -22,7 +22,7 @@ impl<'a> Pipeline<'a> {
         creativity: f32,
         use_persistent_memory: bool,
         mut system_fn: impl FnMut(PromptFormatter) -> PromptFormatter + 'static,
-        mut input_fn: impl FnMut(PromptFormatter, &JsonMap) -> PromptFormatter + 'static,
+        mut input_fn: impl FnMut(PromptFormatter, &JsonMap) -> Option<PromptFormatter> + 'static,
         mut output_fn: impl FnMut(&mut Inference, &JsonMap) + 'static,
         example_pairs: &[(JsonMap, JsonMap)],
         context_size: Option<u32>,
@@ -37,10 +37,10 @@ impl<'a> Pipeline<'a> {
         // Generate example messages from the example pairs
         for (inputs, outputs) in example_pairs {
             // Initialize the user prompt with the input function
-            let formatter = (input_fn)(PromptFormatter::new(), inputs);
-
-            // Push the formatted user message to the chat
-            chat.push_message(ChatRole::User, formatter.format(inputs));
+            if let Some(formatter) = (input_fn)(PromptFormatter::new(), inputs) {
+                // Push the formatted user message to the chat
+                chat.push_message(ChatRole::User, formatter.format(inputs));
+            }
 
             // Supply the outputs for the response
             chat.supply_outputs_for_response(Some(outputs.clone()));
@@ -80,11 +80,11 @@ impl<'a> Pipeline<'a> {
         }
 
         // Initialize the user prompt with the input function
-        let formatter = (self.input_fn)(PromptFormatter::new(), inputs);
-
-        // Push the formatted user message to the chat
-        self.chat
-            .push_message(ChatRole::User, formatter.format(inputs));
+        if let Some(formatter) = (self.input_fn)(PromptFormatter::new(), inputs) {
+            // Push the formatted user message to the chat
+            self.chat
+                .push_message(ChatRole::User, formatter.format(inputs));
+        }
 
         // Infer the outputs based on the current state of the chat and the inputs
         let outputs = self
@@ -98,5 +98,15 @@ impl<'a> Pipeline<'a> {
             });
 
         outputs
+    }
+
+    /// Get a reference to the internal chat object for advanced operations.
+    pub fn chat(&self) -> &Chat<'a> {
+        &self.chat
+    }
+
+    /// Get a mutable reference to the internal chat object for advanced operations.
+    pub fn chat_mut(&mut self) -> &mut Chat<'a> {
+        &mut self.chat
     }
 }
