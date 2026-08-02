@@ -1,5 +1,5 @@
 use std::{
-    cell::RefCell, fmt::{Debug, Display}, marker::PhantomData, rc::Rc,
+    cell::RefCell, fmt::{Debug, Display}, marker::PhantomData, path::Path, rc::Rc,
 };
 
 use anyhow::Result;
@@ -38,9 +38,10 @@ impl Display for Capability {
 pub enum ParameterType {
     String,
     Number,
-    Boolean,
     Object,
     Array,
+    Any,
+    Boolean,
 }
 
 /// A single parameter for a function.
@@ -178,21 +179,10 @@ impl<E: Environment> Function<E> {
 
     /// Creates a JSON representation of the function.
     pub fn to_json(&self) -> serde_json::Value {
-        let params: Vec<serde_json::Value> = self
+        let params: Vec<_> = self
             .parameters
             .iter()
-            .map(|p| {
-                serde_json::json!({
-                    "name": p.name,
-                    "type": match p.param_type {
-                        ParameterType::String => "string",
-                        ParameterType::Number => "number",
-                        ParameterType::Boolean => "boolean",
-                        ParameterType::Object => "object",
-                        ParameterType::Array => "array",
-                    },
-                })
-            })
+            .map(|p| p.name.clone())
             .collect();
 
         serde_json::json!({
@@ -244,6 +234,9 @@ impl<E: Environment> Function<E> {
                         wlog!("Argument '{}' is not an array", param.name);
                         return false;
                     }
+                }
+                ParameterType::Any => {
+                    // Any type is allowed, so we don't need to check anything here.
                 }
             }
         }
@@ -327,7 +320,7 @@ pub trait Environment: Sized {
             Ok((func.body.clone()).borrow_mut()(self, args).into())
         } else {
             Err(anyhow::anyhow!(
-                "Function '{}' is not valid or does not exist.",
+                "No function named '{}' available.",
                 name
             ))
         }
@@ -385,7 +378,7 @@ impl<'a, E: Environment> Agent<'a, E> {
     /// Creates a new agent with capabilities in the given environment.
     pub fn new(core: &'a Core, environment: &E, creativity: f32, capabilities: Vec<Capability>) -> Self {
         // Create an agent pipeline
-        let mut pipeline = core.new_agent_pipeline(creativity, environment.get_allowed_functions(&capabilities));
+        let mut pipeline = core.new_agent_pipeline(environment, creativity, environment.get_allowed_functions(&capabilities));
 
         // Get a checkpoint of the pipeline's chat so that we can reset it after each run.
         let checkpoint = pipeline.chat_mut().create_checkpoint();
@@ -403,8 +396,27 @@ impl<'a, E: Environment> Agent<'a, E> {
         &mut self,
         environment: &mut E,
         task: impl AsRef<str>,
+        log_file: Option<&Path>,
     ) -> serde_json::Value {
         let task = task.as_ref().to_string();
+
+        // If the log file is provided, write all messages in the pipeline chat to the log file before starting the agent loop, overwriting any existing content in the log file.
+        if let Some(log_file) = log_file {
+            let chat = self.pipeline.chat_mut();
+            let mut log_content = String::new();
+
+            for message in chat.messages() {
+                log_content.push_str(&format!(
+                    "# **Message from {}**\n{}\n\n---\n\n",
+                    message.role.to_chatml_role(),
+                    &message.content
+                ));
+            }
+
+            if let Err(e) = std::fs::write(log_file, log_content) {
+                wlog!("Failed to write to log file '{}': {}", log_file.display(), e);
+            }
+        }
 
         // Agent loop
         let mut first_iteration = true;
@@ -423,8 +435,24 @@ impl<'a, E: Environment> Agent<'a, E> {
             // Run the pipeline with the inputs
             let mut outputs = self.pipeline.run(&inputs);
 
+
             // Get the chat from the pipeline to feed errors and tool results back into the agent
             let chat = self.pipeline.chat_mut();
+
+            // If log file is provided, append last chat message to the log file
+            if let Some(log_file) = log_file {
+                let last_message = chat.messages().last().expect("No messages in chat, did the pipeline run fail somehow?");
+
+                let message_string = format!(
+                    "# **Message from {}**\n{}\n\n---\n\n",
+                    last_message.role.to_chatml_role(),
+                    &last_message.content
+                );
+
+                if let Err(e) = std::fs::OpenOptions::new().append(true).create(true).open(log_file).and_then(|mut file| std::io::Write::write_all(&mut file, message_string.as_bytes())) {
+                    wlog!("Failed to write to log file '{}': {}", log_file.display(), e);
+                }
+            }
             
             // Validate the output function call
             let function_name = outputs
@@ -438,13 +466,18 @@ impl<'a, E: Environment> Agent<'a, E> {
             outputs.remove("function_name");
             let arguments = outputs;
 
+            // Log the function name
+            let arg_list = arguments
+                .iter()
+                .map(|(k, v)| format!("{}: {}", k, serde_json::to_string(v).unwrap()))
+                .collect::<Vec<String>>()
+                .join(", ");
+            dlog!("Agent tried calling function: {}({})", function_name, arg_list);
+
             // If the function is "finish", return
             if function_name == "finish" {
                 break serde_json::Value::Object(arguments);
             }
-
-            // Log the function name
-            dlog!("Agent tried calling function: {}", function_name);
 
             // Execute the function in the environment
             let function_result = environment.execute_function(
@@ -453,27 +486,54 @@ impl<'a, E: Environment> Agent<'a, E> {
                 &arguments,
             );
 
-            // If the function execution failed, feed the error back into the agent and continue
+            // Feed the function result back into the agent
             match function_result {
                 Ok(result) => {
                     // Feed the result back into the agent
-                    let result_json = match result {
-                        FunctionResult::Ok(map) => serde_json::Value::Object(map),
-                        FunctionResult::Err(message) => serde_json::json!({
+                    let (result_json, successful) = match result {
+                        FunctionResult::Ok(map) => (serde_json::Value::Object(map), true),
+                        FunctionResult::Err(message) => (serde_json::json!({
                             "error": message,
-                        }),
+                        }), false),
                     };
 
+                    // Convert the result to a pretty JSON string for logging and feeding back into the agent
+                    let content = serde_json::to_string_pretty(&result_json).unwrap();
+
+                    // Log the function result
+                    if successful {
+                        dlog!("Function '{}' executed successfully:\n{}", function_name, content);
+                    } else {
+                        wlog!("Function '{}' failed:\n{}", function_name, content);
+                    }
+
                     // Push the function result to the chat
-                    chat.push_message(ChatRole::System, serde_json::to_string(&result_json).unwrap());
+                    chat.push_message(ChatRole::Function, content);
                 }
                 Err(e) => {
-                    // Log the error and feed it back into the agent
+                    // Log the error
                     wlog!("Error executing function '{}': {}", function_name, e);
                     let error_json = serde_json::json!({
                         "error": e.to_string(),
                     });
-                    chat.push_message(ChatRole::System, serde_json::to_string(&error_json).unwrap());
+
+                    // Feed the error to the agent so that it can try to recover and continue its task
+                    chat.push_message(ChatRole::Function, serde_json::to_string_pretty(&error_json).unwrap());
+                }
+            }
+
+            // If log file is provided, append the function result message to the log file
+            if let Some(log_file) = log_file {
+                let last_message = chat.messages().last().expect("No messages in chat, did something go wrong?");
+
+                let message_string = format!(
+                    "# **Message from {}**\n{}\n\n---\n\n",
+                    last_message.role.to_chatml_role(),
+                    &last_message.content
+                );
+
+                if let Err(e) = std::fs::OpenOptions::new().append(true).create(true).open(log_file).and_then(|mut file| std::io::Write::write_all(&mut file, message_string.as_bytes())) {
+                    wlog!("Failed to write to log file '{}': {}", log_file.display(), e);
                 }
             }
         };

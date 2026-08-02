@@ -16,7 +16,7 @@ use crate::{
 };
 
 const BATCH_CAPACITY: usize = 4096;
-const CREATIVITY_NUDGE_DOWN_EVERY_N: usize = 4096; // Every N tokens, we nudge the creativity down towards 0.0 for stability over long contexts.
+const CREATIVITY_NUDGE_DOWN_EVERY_N: usize = 16384; // Every N tokens, we nudge the creativity down towards 0.0 for stability over long contexts.
 /// Higher = creativity adapts downwards slower.
 const CREATIVITY_DOWN_DIVISOR: f32 = 7.0;
 /// Higher = creativity adapts upwards slower.
@@ -31,7 +31,7 @@ fn new_sampler(creativity: f32, seed: u32) -> LlamaSampler {
     let creativity = creativity.clamp(0.0, 1.0);
 
     // Calculate a mininum probability based on creativity
-    let min_probability = 0.1 + (1.0 - creativity.sqrt()) * 0.6; // 0.7 at creativity 0.0, 0.1 at creativity 1.0
+    let min_probability = 0.15 + 0.2 * (1.0 - creativity.sqrt()); // 0.35 at creativity 0.0, 0.15 at creativity 1.0
 
     // Calculate a probability target based on creativity
     // If creativity is very close zero then set target to -1.0 as this makes the adaptive_p sampler a no-op
@@ -564,14 +564,15 @@ impl<'a> Inference<'a> {
 
     /// Infer with output handling. The result is stored in the outputs map under the given name.
     /// If a value is found in the supplied outputs under the given name, it will be used instead of inferring.
-    /// Also returns a mutable reference to the value stored in the outputs map under the given name, allowing further manipulation.
+    /// Returns a mutable reference to the value stored in the outputs map under the given name, allowing further manipulation.
+    /// Also returns the stop sequence that was encountered, if any.
     /// If `parse_json` is true, the inferred result will be parsed as JSON before being inserted into the outputs map.
     pub fn infer_output(
         &mut self,
         name: impl Display,
         stop_sequences: &[&str],
         parse_json: bool,
-    ) -> &mut Value {
+    ) -> (&mut Value, Option<String>) {
         let name = name.to_string();
 
         // Check if a value is supplied for this output name and use it if available.
@@ -591,15 +592,21 @@ impl<'a> Inference<'a> {
             self.outputs.insert(name.clone(), value);
 
             // Return a mutable reference to the value in the outputs map.
-            return self.outputs.get_mut(&name).unwrap();
+            return (self.outputs.get_mut(&name).unwrap(), stop_sequences.iter().next().map(|s| s.to_string()));
         }
 
         // If no supplied value is found, perform inference.
         let result = self.infer(None, stop_sequences);
-        let result = result.content_without_stop_sequence().trim().to_string();
+        let encountered_stop_sequence = result.encountered_stop_sequence.clone();
+        let mut result = result.content_without_stop_sequence().trim().to_string();
 
         // Parse the result as JSON if requested, otherwise insert as a string.
         if parse_json {
+            // If the result starts with '"' but doesn't end with '"', then we probably have a malformed JSON string, so we insert the closing '"' and parse again
+            if result.starts_with('"') && !result.ends_with('"') {
+                result.push('"');
+            }
+
             self.outputs.insert(
                 name.clone(),
                 serde_json::from_str(&result).unwrap_or(Value::String(result)),
@@ -609,7 +616,7 @@ impl<'a> Inference<'a> {
         }
 
         // Return a mutable reference to the value in the outputs map.
-        self.outputs.get_mut(&name).unwrap()
+        (self.outputs.get_mut(&name).unwrap(), encountered_stop_sequence)
     }
 
     /// Generate a reasoning trace in the context, and return the string.

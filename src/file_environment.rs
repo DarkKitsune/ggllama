@@ -78,9 +78,11 @@ impl DirectoryEnvironment {
                     }
                 }
 
-                // Skip the protected environment.json file
-                if path.file_name().map(|n| n.to_string_lossy()) == Some("environment.json".into()) {
-                    continue;
+                // Skip the protected environment.json file and .agents.md file, which are both protected
+                if let Some(file_name) = path.file_name().map(|n| n.to_string_lossy()) {
+                    if file_name == "environment.json" || file_name == ".agents.md" {
+                        continue;
+                    }
                 }
 
                 if path.is_file() || (include_directories && path.is_dir()) {
@@ -97,13 +99,13 @@ impl DirectoryEnvironment {
         files
     }
 
-    /// Gets all files in the root of the directory wrapped by this environment.
-    pub fn get_all_files_and_directories(&self) -> Vec<PathBuf> {
-        self.get_files(".", true, true)
+    /// Gets all files and subdirectories in the given directory within the directory wrapped by this environment, recursively.
+    pub fn get_all_files_and_directories(&self, relative_path: impl AsRef<Path>) -> Vec<PathBuf> {
+        self.get_files(relative_path, true, true)
     }
 
     /// Reads the contents of a file in the directory wrapped by this environment.
-    pub fn read_file(&self, file_path: impl AsRef<Path>) -> Result<String> {
+    pub fn read_file(&self, file_path: impl AsRef<Path>, allow_protected: bool) -> Result<String> {
         // Join the paths and then get the absolute path
         let full_path = self.path.join(&file_path);
         let full_path = absolute(&full_path)
@@ -117,20 +119,51 @@ impl DirectoryEnvironment {
             ));
         }
 
-        // Ensure that the file is not environment.json, which is protected
-        if full_path.file_name().map(|n| n.to_string_lossy()) == Some("environment.json".into()) {
-            return Err(anyhow::anyhow!(
-                "Attempted to read a protected environment file: {}",
-                full_path.display()
-            ));
+        // Ensure that the file is not environment.json or .agents.md, which are both protected
+        if !allow_protected {
+            if let Some(file_name) = full_path.file_name().map(|n| n.to_string_lossy()) {
+                if file_name == "environment.json" || file_name == ".agents.md" {
+                    return Err(anyhow::anyhow!(
+                        "Attempted to read a protected environment file: {}",
+                        full_path.display()
+                    ));
+                }
+            }
         }
 
         std::fs::read_to_string(&full_path)
             .map_err(|e| anyhow::anyhow!("Failed to read file: {}: {}", full_path.display(), e))
     }
 
+    /// Creates the directory at the given path within the directory wrapped by this environment, including any necessary parent directories.
+    /// If the directory already exists, this function does nothing.
+    pub fn create_directory(&mut self, dir_path: impl AsRef<Path>) -> Result<()> {
+        // Join the paths and then get the absolute path
+        let full_path = self.path.join(&dir_path);
+        let full_path = absolute(&full_path)
+            .unwrap_or_else(|_| panic!("Failed to get absolute path: {}", full_path.display()));
+        
+        // Ensure the full path is within the directory wrapped by this environment.
+        if !full_path.starts_with(&self.path) {
+            return Err(anyhow::anyhow!(
+                "Attempted to create a directory outside the environment directory: {}",
+                full_path.display()
+            ));
+        }
+
+        // Create the directory and any necessary parent directories.
+        std::fs::create_dir_all(&full_path)
+            .map_err(|e| anyhow::anyhow!("Failed to create one or more directories: {}: {}", full_path.display(), e))?;
+
+        // Record the modified directory
+        self.modified_files.push(full_path);
+
+        Ok(())
+    }
+
+
     /// Writes contents to a file in the directory wrapped by this environment.
-    pub fn write_file(&mut self, file_path: impl AsRef<Path>, contents: &str) -> Result<()> {
+    pub fn write_file(&mut self, file_path: impl AsRef<Path>, contents: &str, allow_protected: bool) -> Result<()> {
         // Join the paths and then get the absolute path
         let full_path = self.path.join(&file_path);
         let full_path = absolute(&full_path).unwrap_or_else(|e| {
@@ -144,17 +177,21 @@ impl DirectoryEnvironment {
         // Ensure the full path is within the directory wrapped by this environment.
         if !full_path.starts_with(&self.path) {
             return Err(anyhow::anyhow!(
-                "Attempted to write a file outside the directory: {}",
+                "Attempted to write a file outside the environment directory: {}",
                 full_path.display()
             ));
         }
 
-        // Ensure that the file is not environment.json, which is protected
-        if full_path.file_name().map(|n| n.to_string_lossy()) == Some("environment.json".into()) {
-            return Err(anyhow::anyhow!(
-                "Attempted to write to a protected environment file: {}",
-                full_path.display()
-            ));
+        // Ensure that the file is not environment.json or .agents.md, which are both protected
+        if !allow_protected {
+            if let Some(file_name) = full_path.file_name().map(|n| n.to_string_lossy()) {
+                if file_name == "environment.json" || file_name == ".agents.md" {
+                    return Err(anyhow::anyhow!(
+                        "Attempted to write to a protected environment file: {}",
+                        full_path.display()
+                    ));
+                }
+            }
         }
 
         // Create all directories in the path if they do not exist.
@@ -180,11 +217,12 @@ impl DirectoryEnvironment {
         file_path: impl AsRef<Path>,
         target: &str,
         replacement: &str,
+        allow_protected: bool,
     ) -> Result<()> {
-        let contents = self.read_file(&file_path)?;
+        let contents = self.read_file(&file_path, allow_protected)?;
         if let Some(_) = contents.find(target) {
             let new_contents = contents.replacen(target, replacement, 1);
-            self.write_file(file_path, &new_contents)?;
+            self.write_file(file_path, &new_contents, allow_protected)?;
             Ok(())
         } else {
             Err(anyhow::anyhow!(
@@ -201,8 +239,9 @@ impl DirectoryEnvironment {
         start_line: usize,
         end_line: usize,
         replacement: &str,
+        allow_protected: bool,
     ) -> Result<()> {
-        let contents = self.read_file(&file_path)?;
+        let contents = self.read_file(&file_path, allow_protected)?;
         let mut lines: Vec<&str> = contents.lines().collect();
         if start_line == 0 || end_line > lines.len() || start_line > end_line {
             return Err(anyhow::anyhow!(
@@ -218,7 +257,7 @@ impl DirectoryEnvironment {
         lines.splice((start_line - 1)..end_line, replacement.lines());
 
         let new_contents = lines.join("\n");
-        self.write_file(file_path, &new_contents)?;
+        self.write_file(file_path, &new_contents, allow_protected)?;
         Ok(())
     }
 
@@ -266,16 +305,25 @@ impl DirectoryEnvironment {
             "[package]\nname = \"{}\"\nversion = \"{}\"\nedition = \"2024\"\n\n[dependencies]\n",
             name, version
         );
-        self.write_file("Cargo.toml", &cargo_toml_contents)?;
+        self.write_file("Cargo.toml", &cargo_toml_contents, false)?;
 
         // Create a src directory and a main.rs file with a simple "Hello, world!" program
-        self.write_file("src/main.rs", "fn main() {\n    println!(\"Hello, world!\");\n}\n")?;
+        self.write_file("src/main.rs", "fn main() {\n    println!(\"Hello, world!\");\n}\n", false)?;
         
         Ok(())
     }
 
     /// Runs the cargo project in the directory wrapped by this environment and returns the output.
     pub fn run_cargo_project(&self) -> Result<String> {
+        // Exit early if Cargo.toml does not exist in the directory wrapped by this environment.
+        let cargo_toml_path = self.path.join("Cargo.toml");
+        if !cargo_toml_path.exists() {
+            return Err(anyhow::anyhow!(
+                "Attempted to run cargo project but no Cargo.toml was found at: {}",
+                cargo_toml_path.display()
+            ));
+        }
+
         let output = std::process::Command::new("cargo")
             .arg("run")
             .current_dir(&self.path)
@@ -336,7 +384,7 @@ impl DirectoryEnvironment {
 
 impl Environment for DirectoryEnvironment {
     fn environment_prompt(&self) -> String {
-        let files = self.get_all_files_and_directories();
+        let files = self.get_all_files_and_directories(".");
         if files.is_empty() {
             format!(
                 "The environment is a directory in a file system.\n\
@@ -360,14 +408,17 @@ impl Environment for DirectoryEnvironment {
         vec![
             // Function to get files in a given relative path within the environment directory.
             Function::new(
-                "get_files",
-                "Gets all files and subdirectories in the environment directory and all of its subdirectories, recursively, \
-                and returns them as a list of paths relative to the environment directory.",
+                "list_files",
+                "Gets all files and subdirectories in the given directory and all of its subdirectories, recursively, \
+                and returns them as a list of paths relative to the environment directory. If there are no files, returns an empty list.",
+                vec![FunctionParameter::new(
+                    "relative_path",
+                    ParameterType::String,
+                )],
                 vec![],
-                vec![],
-                |env: &mut DirectoryEnvironment, _args: &JsonMap| {
+                |env: &mut DirectoryEnvironment, args: &JsonMap| {
                     Ok(map! {
-                        "files" => env.get_all_files_and_directories()
+                        "files" => env.get_all_files_and_directories(args.get("relative_path").and_then(|v| v.as_str()).unwrap_or("."))
                     })
                 },
             ),
@@ -387,17 +438,41 @@ impl Environment for DirectoryEnvironment {
                         .as_str()
                         .ok_or(anyhow::anyhow!("Argument 'relative_path' is not a string"))?;
                     Ok(map! {
-                        "contents" => env.read_file(file_path)?
+                        "contents" => env.read_file(file_path, false)?
+                    })
+                },
+            ),
+            // Function to create a directory in the environment directory.
+            Function::new(
+                "create_directory",
+                "Creates the directory `relative_path` in the environment directory, including any necessary parent directories. \
+                If the directory already exists, this function does nothing.",
+                vec![FunctionParameter::new(
+                    "relative_path",
+                    ParameterType::String,
+                )],
+                vec![
+                    Capability::FileWrite,
+                ],
+                |env: &mut DirectoryEnvironment, args: &JsonMap| {
+                    let dir_path = args
+                        .get("relative_path")
+                        .ok_or(anyhow::anyhow!("Missing argument: relative_path"))?
+                        .as_str()
+                        .ok_or(anyhow::anyhow!("Argument 'relative_path' is not a string"))?;
+                    env.create_directory(dir_path)?;
+                    Ok(map! {
+                        "status" => "success"
                     })
                 },
             ),
             // Function to write contents to a file in the environment directory.
             Function::new(
                 "write_file",
-                "Writes `content` to the text file under `relative_path` in the environment directory.",
+                "Writes `file_contents` to the text file under `relative_path` in the environment directory.",
                 vec![
                     FunctionParameter::new("relative_path", ParameterType::String),
-                    FunctionParameter::new("content", ParameterType::String),
+                    FunctionParameter::new("file_contents", ParameterType::Any),
                 ],
                 vec![
                     Capability::FileWrite,
@@ -408,12 +483,15 @@ impl Environment for DirectoryEnvironment {
                         .ok_or(anyhow::anyhow!("Missing argument: relative_path"))?
                         .as_str()
                         .ok_or(anyhow::anyhow!("Argument 'relative_path' is not a string"))?;
+                    // For contents we allow non-string types by converting them to strings using `to_string()`. This allows for more flexibility in what can be written to a file.
                     let contents = args
-                        .get("content")
-                        .ok_or(anyhow::anyhow!("Missing argument: content"))?
+                        .get("file_contents")
+                        .ok_or(anyhow::anyhow!("Missing argument: file_contents"))?;
+                    let contents = contents
                         .as_str()
-                        .ok_or(anyhow::anyhow!("Argument 'content' is not a string"))?;
-                    env.write_file(file_path, contents)?;
+                        .map(str::to_string)
+                        .unwrap_or_else(|| contents.to_string());
+                    env.write_file(file_path, &contents, false)?;
                     Ok(map! {
                         "status" => "success"
                     })
@@ -451,7 +529,7 @@ impl Environment for DirectoryEnvironment {
                         .ok_or(anyhow::anyhow!("Argument 'replacement' is not a string"))?
                         .to_string();
 
-                    let result = env.edit_file(file_path, &target, &replacement);
+                    let result = env.edit_file(file_path, &target, &replacement, false);
                     match result {
                         Ok(_) => Ok(map! {
                             "status" => "success",
@@ -464,6 +542,7 @@ impl Environment for DirectoryEnvironment {
                     }
                 },
             ),
+
             // Function to run a Python script in the environment directory.
             Function::new(
                 "run_python",

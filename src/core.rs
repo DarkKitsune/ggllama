@@ -17,6 +17,8 @@ static BACKEND: LlamaBackend = LlamaBackend::init().unwrap();
 pub enum CompressionLevel {
     /// No compression, using FP16 for the KV cache as the model's weights.
     None,
+    /// Low compression. Reduces VRAM usage slightly, with minimal impact on performance.
+    Low,
     /// Medium compression. Balanced between VRAM usage and performance.
     Medium,
     /// Significant VRAM reduction, but may result in worse performance (speed & quality).
@@ -60,13 +62,15 @@ impl Core {
             .with_n_ctx(Some(NonZeroU32::new(context_size).expect("context_size must be non-zero")))
             .with_n_batch(4096)
             .with_cache_type_k(match self.compression {
-                CompressionLevel::High => GgmlType::Q5_1,
+                CompressionLevel::High => GgmlType::Q8_0,
                 CompressionLevel::Medium => GgmlType::Q8_0,
+                CompressionLevel::Low => GgmlType::F16,
                 CompressionLevel::None => GgmlType::F16,
             })
             .with_cache_type_v(match self.compression {
-                CompressionLevel::High => GgmlType::Q8_0,
+                CompressionLevel::High => GgmlType::Q5_1,
                 CompressionLevel::Medium => GgmlType::Q8_0,
+                CompressionLevel::Low => GgmlType::Q8_0,
                 CompressionLevel::None => GgmlType::F16,
             });
         let context = self.new_context(ctx_params);
@@ -262,7 +266,7 @@ impl Core {
                 inference.restore_checkpoint(checkpoint.clone());
 
                 // Output the grade letter from the model.
-                output = inference.infer_output("output", &["\"}", "}"], false);
+                output = inference.infer_output("output", &["\"}", "}"], false).0;
 
                 // Look up the index of the answer letter in IDX_TO_LETTER using the first character of output
                 let answer_letter = output.as_str().unwrap().chars().next().unwrap_or(' ');
@@ -384,6 +388,7 @@ Be creative, let every character have a chance to shine, and keep the story inte
                 // Infer the turn type
                 let turn_type = inference
                     .infer_output("turn_type", &["\""], false)
+                    .0
                     .as_str()
                     .unwrap()
                     .to_string();
@@ -403,6 +408,7 @@ Be creative, let every character have a chance to shine, and keep the story inte
                     // Infer the character name
                     let character_name = inference
                         .infer_output("character_name", &["\""], false)
+                        .0
                         .as_str()
                         .unwrap()
                         .to_string();
@@ -431,7 +437,7 @@ Be creative, let every character have a chance to shine, and keep the story inte
                 }
 
                 // Infer the content
-                let content = inference.infer_output("content", &["\""], false);
+                let content = inference.infer_output("content", &["\""], false).0;
 
                 // If this is a dialogue turn, insert the name back into the beginning of the output.
                 if turn_type == "dialogue" {
@@ -535,6 +541,7 @@ Be creative, let every character have a chance to shine, and keep the story inte
                 // Infer the turn type
                 let turn_type = inference
                     .infer_output("turn_type", &["\""], false)
+                    .0
                     .as_str()
                     .unwrap()
                     .to_string();
@@ -555,7 +562,7 @@ Be creative, let every character have a chance to shine, and keep the story inte
                 }
 
                 // Infer the content
-                let content = inference.infer_output("content", &["\""], false);
+                let content = inference.infer_output("content", &["\""], false).0;
 
                 // If this is a dialogue turn, insert the name back into the beginning of the output.
                 if turn_type == "dialogue" {
@@ -590,45 +597,56 @@ Be creative, let every character have a chance to shine, and keep the story inte
     /// If continuing the task, the input hashmap should omit the "task" key.
     /// The function name for that turn will be provided under the "function_name" key in the output hashmap, and the arguments for that function will be provided under their names.
     /// The agent will have access to a set of functions that it can call to interact with the environment.
-    pub fn new_agent_pipeline<'a, E: Environment>(&'a self, creativity: f32, functions: impl Into<Vec<Function<E>>>) -> Pipeline<'a> {
+    pub fn new_agent_pipeline<'a, E: Environment>(&'a self, environment: &E, creativity: f32, functions: impl Into<Vec<Function<E>>>) -> Pipeline<'a> {
         let functions = functions.into();
 
         let function_jsons = functions
             .iter()
             .map(|f| serde_json::to_string_pretty(&f.to_json()).unwrap())
             .collect::<Vec<_>>()
-            .join("\n");
+            .join("\n\n");
 
         /// Defines the structure of the system prompt.
-        fn agent_system(formatter: PromptFormatter, function_jsons: &str) -> PromptFormatter {
+        fn agent_system(formatter: PromptFormatter, environment_string: &str, function_jsons: &str) -> PromptFormatter {
+            println!("Environment String: {}", environment_string);
+            println!("Function JSONs: {}", function_jsons);
             formatter
                 .with_section(TextSection::new(
                     Some("Your Role".to_string()),
-                    "You are an intelligent agent that can perform tasks in a virtual environment.\n\
-                    The user will provide you with a code block containing a task for you to perform. \
-                    You must complete said task using only the functions under \"Available Functions\" below. \
-                    Use exactly *one* function call per turn, and do not provide any other output.\n \
-                    Once the task is complete, respond with a function call to `finish` with the result of the task as the argument."
+                    format!(
+                        "You are an intelligent agent that can perform tasks in a virtual environment. \
+                        You are very knowledgeable in many areas including science, technology, and the arts.\n\
+                        The user will provide you with a task for you to perform. Plan out how you will complete the task, then put that plan into action. \
+                        You must complete said task using only the functions under \"Available Functions\" below. 
+                        Do only the task you are given, do not deviate from it or take any unnecessary actions.\n\
+                        Once the task is complete, you should call `finish` with the result or summary of the task as the argument.\n\
+                        The current state of the environment is as follows:\n```\n{}\n```\n",
+                        environment_string
+                    )
                 ))
                 .with_section(TextSection::new(
                     Some("Available Functions".to_string()),
                     format!(
-                        "You may call *one* of the available functions at a time to assist with the user query. \
+                        "You must call exactly *1* of the available functions per turn to assist with the user query. \
+                        There should be no other text before or after the function call. \
                         The available functions are listed below within <tools></tools> XML tags:\n\
                         <tools>\n{}\n</tools>\n\n\
                         You must call the functions exactly as they are defined, and you must provide arguments to all required parameters. \
-                        For each function call, output the function name and arguments within <function_call></function_call>, using the exact following XML format:
+                        A function call *must* be written in XML between <function_call></function_call> XML tags, \
+                        with the function name and arguments provided correctly. For example:\n\
 <function_call>
-<function=example_function_name>
-<parameter=example_parameter_1>
-value_1
+<function=example_function>
+<parameter=param1>
+\"value1\"
 </parameter>
-<parameter=example_parameter_2>
-This is the value for the second parameter
-that can span
-multiple lines
+<parameter=param2>
+46
 </parameter>
-</function>
+<parameter=param3>
+{{
+    \"key\": \"value\"
+}}
+</parameter>
 </function_call>",
                         function_jsons
                     )
@@ -656,7 +674,7 @@ multiple lines
             inference.push_text("<function_call>\n<function=");
 
             // Infer the function name and closing bracket for the function tag.
-            let function_name = inference.infer_output("function_name", &[">"], false).as_str().unwrap_or_default().to_string();
+            let function_name = inference.infer_output("function_name", &[">"], false).0.as_str().unwrap_or_default().to_string();
             
             // Newline after tag
             inference.push_text("\n");
@@ -687,11 +705,12 @@ multiple lines
             .collect::<HashMap<_, _>>();
 
         // Create the pipeline
+        let environment_string = environment.environment_prompt();
         Pipeline::new(
             self,
             creativity,
             true,
-            move |formatter| agent_system(formatter, &function_jsons),
+            move |formatter| agent_system(formatter, &environment_string, &function_jsons),
             agent_input,
             move |inference, inputs| agent_output(inference, inputs, &function_params),
             &[],

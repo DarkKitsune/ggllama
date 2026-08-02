@@ -1,9 +1,5 @@
 use crate::{
-    chat::{Chat, ChatCheckpoint, ChatRole},
-    core::Core,
-    inference::Inference,
-    prompt_formatter::PromptFormatter,
-    util::JsonMap,
+    chat::{Chat, ChatCheckpoint, ChatRole}, core::Core, dlog, inference::Inference, prompt_formatter::PromptFormatter, util::JsonMap,
 };
 
 /// A pipeline defines a set of inputs and outputs and the processing logic that transforms the inputs into the outputs.
@@ -13,6 +9,7 @@ pub struct Pipeline<'a> {
     output_fn: Box<dyn FnMut(&mut Inference, &JsonMap)>,
     restore_checkpoint: Option<ChatCheckpoint>,
     has_run: bool,
+    use_reasoning: bool,
 }
 
 impl<'a> Pipeline<'a> {
@@ -65,6 +62,7 @@ impl<'a> Pipeline<'a> {
             output_fn: Box::new(output_fn),
             restore_checkpoint,
             has_run: false,
+            use_reasoning,
         }
     }
 
@@ -89,7 +87,7 @@ impl<'a> Pipeline<'a> {
         // Infer the outputs based on the current state of the chat and the inputs
         let outputs = self
             .chat
-            .infer_response_ext(false, |inference, _reasoning| {
+            .infer_response_ext(self.use_reasoning, |inference, reasoning| {
                 // Call the output function to populate the outputs.
                 (self.output_fn)(inference, inputs);
 
