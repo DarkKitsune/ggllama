@@ -615,7 +615,8 @@ Be creative, let every character have a chance to shine, and keep the story inte
                     Some("Your Role".to_string()),
                     format!(
                         "You are an intelligent agent that can perform tasks in a virtual environment. \
-                        You are very knowledgeable in many areas including science, technology, and the arts.\n\
+                        You are very knowledgeable in many areas including science, technology, and the arts. \
+                        Your writing style is clear and concise. You do not include unnecessary details or fluff in either your writing or your code.\n\
                         The user will provide you with a task for you to perform. Plan out how you will complete the task, then put that plan into action. \
                         You must complete said task using only the functions under \"Available Functions\" below. 
                         Do only the task you are given, do not deviate from it or take any unnecessary actions.\n\
@@ -691,7 +692,7 @@ Be creative, let every character have a chance to shine, and keep the story inte
                     inference.infer_output(param_name, &["</parameter>"], true);
 
                     // Newline after closing tag
-                    inference.push_text(&format!("\n"));
+                    inference.push_text("\n");
                 }
             }
 

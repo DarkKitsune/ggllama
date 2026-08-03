@@ -31,7 +31,7 @@ fn new_sampler(creativity: f32, seed: u32) -> LlamaSampler {
     let creativity = creativity.clamp(0.0, 1.0);
 
     // Calculate a mininum probability based on creativity
-    let min_probability = 0.15 + 0.2 * (1.0 - creativity.sqrt()); // 0.35 at creativity 0.0, 0.15 at creativity 1.0
+    let min_probability = 0.1 + 0.2 * (1.0 - creativity.sqrt()); // 0.3 at creativity 0.0, 0.1 at creativity 1.0
 
     // Calculate a probability target based on creativity
     // If creativity is very close zero then set target to -1.0 as this makes the adaptive_p sampler a no-op
