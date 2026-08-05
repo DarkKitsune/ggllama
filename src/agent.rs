@@ -44,6 +44,19 @@ pub enum ParameterType {
     Boolean,
 }
 
+impl Display for ParameterType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ParameterType::String => write!(f, "string"),
+            ParameterType::Number => write!(f, "number"),
+            ParameterType::Object => write!(f, "object"),
+            ParameterType::Array => write!(f, "array"),
+            ParameterType::Any => write!(f, "any"),
+            ParameterType::Boolean => write!(f, "boolean"),
+        }
+    }
+}
+
 /// A single parameter for a function.
 #[derive(Debug, Clone)]
 pub struct FunctionParameter {
@@ -51,14 +64,17 @@ pub struct FunctionParameter {
     pub name: String,
     /// The type of the parameter, which can be used to inform the agent about how to call it.
     pub param_type: ParameterType,
+    /// A description of the parameter, which can be used to inform the agent about its purpose.
+    pub description: String,
 }
 
 impl FunctionParameter {
     /// Creates a new function parameter with the given name, type, and description.
-    pub fn new(name: impl Display, param_type: ParameterType) -> Self {
+    pub fn new(name: impl Display, param_type: ParameterType, description: impl Display) -> Self {
         Self {
             name: name.to_string(),
             param_type,
+            description: description.to_string(),
         }
     }
 }
@@ -192,6 +208,30 @@ impl<E: Environment> Function<E> {
         })
     }
 
+    /// Converts the function to a qwen-style XML representation for system prompts.
+    pub fn to_qwen_xml(&self) -> String {
+        let params: Vec<String> = self
+            .parameters
+            .iter()
+            .map(|p| format!("<parameter={}>\n{} ({})\n</parameter>", p.name, p.description, p.param_type))
+            .collect();
+
+        let description_string = format!("\n<description>\n{}\n</description>\n", self.description);
+
+        let params_string = if params.is_empty() {
+            String::new()
+        } else {
+            format!("{}\n", params.join("\n"))
+        };
+
+        format!(
+            "<function={}>{}{}</function>",
+            self.name,
+            description_string,
+            params_string,
+        )
+    }
+
     /// Validates a set of arguments against the function's parameters
     pub fn validate_arguments(&self, args: &Map<String, serde_json::Value>) -> bool {
         // Loop over the parameters
@@ -288,6 +328,7 @@ pub trait Environment: Sized {
             vec![FunctionParameter {
                 name: "result".to_string(),
                 param_type: ParameterType::String,
+                description: "The result or summary of the task, so the user is aware of what exactly was changed/accomplished.".to_string(),
             }],
             vec![],
             |_env: &mut Self, _args: &Map<String, serde_json::Value>| Ok(Map::new()),

@@ -24,12 +24,13 @@ impl<'a> Pipeline<'a> {
         example_pairs: &[(JsonMap, JsonMap)],
         context_size: Option<u32>,
         use_reasoning: bool,
+        use_small_model: bool,
     ) -> Self {
         // Initialize the system prompt using the provided system function
         let system_prompt = (system_fn)(PromptFormatter::new());
 
         // Start the chat
-        let mut chat = core.start_chat(system_prompt, creativity, None, context_size);
+        let mut chat = core.start_chat(system_prompt, creativity, None, context_size, use_small_model);
 
         // Generate example messages from the example pairs
         for (inputs, outputs) in example_pairs {
@@ -88,6 +89,8 @@ impl<'a> Pipeline<'a> {
         let outputs = self
             .chat
             .infer_response_ext(self.use_reasoning, |inference, reasoning| {
+                println!("\n\nReasoning:\n{:?}\n\n", reasoning);
+
                 // Call the output function to populate the outputs.
                 (self.output_fn)(inference, inputs);
 

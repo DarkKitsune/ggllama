@@ -76,11 +76,12 @@ impl<'a> Chat<'a> {
         creativity: f32,
         seed: Option<u32>,
         context_size_limit: u32,
+        use_small_model: bool,
     ) -> Self {
         let system_prompt = system_prompt.to_string();
 
         // Begin inference
-        let inference = core.infer(creativity, seed, context_size_limit); // Use double the context size limit for inference to allow for some buffer
+        let inference = core.infer(creativity, seed, context_size_limit, use_small_model); // Use double the context size limit for inference to allow for some buffer
 
         // Initialize the all_messages and queued_messages vectors with the system prompt
         // We will actually put messages into the Inference's context later when inferring tokens.
@@ -247,7 +248,7 @@ impl<'a> Chat<'a> {
             // Summarize the messages
             let summary = {
                 // Create summarizer pipeline
-                let mut summarizer = self.inference.core().new_summarizer(self.context_size_limit + 1);
+                let mut summarizer = self.inference.core().new_summarizer(self.context_size_limit + 1, true);
 
                 // Process the chat log through the summarizer
                 summarizer.run(&map! {

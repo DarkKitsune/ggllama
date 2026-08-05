@@ -1,18 +1,12 @@
 use std::{fmt::Display, time::SystemTime};
 
 use llama_cpp_4::{
-    context::LlamaContext,
-    llama_batch::LlamaBatch,
-    model::{AddBos, LlamaChatMessage, LlamaModel, Special},
-    sampling::LlamaSampler,
-    token::LlamaToken,
+    context::LlamaContext, llama_batch::LlamaBatch, model::{AddBos, LlamaChatMessage, LlamaModel, Special}, mtp::MtpSession, sampling::LlamaSampler, token::LlamaToken,
 };
 use serde_json::Value;
 
 use crate::{
-    chat::{ChatMessage, ChatRole},
-    core::Core,
-    util::JsonMap,
+    chat::{ChatMessage, ChatRole}, core::{Core}, util::JsonMap,
 };
 
 const BATCH_CAPACITY: usize = 4096;
@@ -25,26 +19,45 @@ const CREATIVITY_UP_DIVISOR: f32 = 4.0;
 /// This is to encourage creativity and avoid the model getting stuck in a loop of repeating the same output after restoring a checkpoint.
 const CHECKPOINT_RESTORE_CREATIVITY_GRACE: usize = 24;
 
-/// Helper function to create a new sampler.
-fn new_sampler(creativity: f32, seed: u32) -> LlamaSampler {
+/*
+/// Helper function to create a new adaptive sampler.
+fn new_sampler_adaptive(creativity: f32, seed: u32) -> LlamaSampler {
     // Clamp creativity
     let creativity = creativity.clamp(0.0, 1.0);
 
     // Calculate a mininum probability based on creativity
-    let min_probability = 0.1 + 0.2 * (1.0 - creativity.sqrt()); // 0.3 at creativity 0.0, 0.1 at creativity 1.0
+    let min_probability = 0.1 + 0.1 * (1.0 - creativity); // 0.2 at creativity 0.0, 0.1 at creativity 1.0
 
     // Calculate a probability target based on creativity
     // If creativity is very close zero then set target to -1.0 as this makes the adaptive_p sampler a no-op
     let target_probability = if creativity < 0.0001 {
         -1.0
     } else {
-        1.0 - creativity.sqrt() * 0.5
+        1.0 - creativity * 0.5
     };
 
     // Create adaptive sampler which only samples tokens that aren't very unlikely
     LlamaSampler::chain_simple([
         LlamaSampler::min_p(min_probability, 1),
         LlamaSampler::adaptive_p(target_probability, 0.9, seed),
+    ])
+}*/
+
+/// Helper function to create a new standard sampler.
+/// `temperature = creativity`
+fn new_sampler_standard(creativity: f32, seed: u32) -> LlamaSampler {
+    // Clamp creativity to the range [0.0, 1.5]
+    let creativity = creativity.clamp(0.0, 1.5);
+
+    // Calculate a mininum probability based on creativity
+    let min_probability = 0.1 + 0.05 * (1.0 - creativity); // 0.15 at creativity 0.0, 0.1 at creativity 1.0
+
+    // Create standard sampler which only samples tokens that aren't very unlikely
+    LlamaSampler::chain_simple([
+        LlamaSampler::top_k(40),
+        LlamaSampler::min_p(min_probability, 1),
+        LlamaSampler::temp(creativity),
+        LlamaSampler::dist(seed)
     ])
 }
 
@@ -107,6 +120,9 @@ pub struct Inference<'a> {
     queued_text: String,
     /// Flag indicating whether to use Gemma 4 style channels for reasoning.
     use_gemma_channels: bool,
+    /// Flag indicating whether to use the small model for this inference job.
+    /// This is useful for tasks that don't require much intelligence, such as summarization or choosing between options.
+    use_small_model: bool,
 }
 
 impl ChatRole {
@@ -133,6 +149,7 @@ impl<'a> Inference<'a> {
         tokens: Vec<LlamaToken>,
         creativity: f32,
         seed: Option<u32>,
+        use_small_model: bool,
     ) -> Self {
         // If seed is not provided, use the current time as a seed
         let seed = seed.unwrap_or_else(|| {
@@ -143,7 +160,7 @@ impl<'a> Inference<'a> {
         });
 
         // Create a new sampler with the given creativity and seed
-        let sampler = new_sampler(creativity, seed);
+        let sampler = new_sampler_standard(creativity, seed);
 
         // Create batch for decoding tokens into the context
         let batch = LlamaBatch::new(BATCH_CAPACITY, 1);
@@ -162,6 +179,7 @@ impl<'a> Inference<'a> {
             queued_text: String::new(),
             tokens_since_last_creativity_nudge: 0,
             use_gemma_channels: core.use_gemma_format,
+            use_small_model,
         }
     }
 
@@ -172,7 +190,11 @@ impl<'a> Inference<'a> {
 
     /// Get a reference to the model.
     pub(crate) fn model(&self) -> &LlamaModel {
-        self.core.model()
+        if self.use_small_model && let Some(small_model) = self.core.small_model() {
+            small_model
+        } else {
+            self.core.model()
+        }
     }
 
     /// Get the number of tokens in the context so far.
@@ -201,6 +223,7 @@ impl<'a> Inference<'a> {
         // Force unqueue into the context to ensure new logits
         //self.unqueue_to_context(true); // Part of old behavior
 
+        // Save state of context
         let context_state_length = self.context.state_get_size();
         let mut context_state_buffer = vec![0u8; context_state_length];
         self.context.state_get_data(&mut context_state_buffer);
@@ -257,9 +280,10 @@ impl<'a> Inference<'a> {
         // Reset the inference job, clearing the context and other internal states.
         self.reset();
 
-        // Restore the context state from the checkpoint's context_state_buffer.
+        // Restore the target context state from the checkpoint's target_context_state_buffer.
         self.context
             .state_set_data(&checkpoint.context_state_buffer);
+
 
         // Restore the creativity if we are lower, then give it a slight nudge towards 1.0 to ensure new results after restoring a checkpoint.
         let creativity = checkpoint.creativity.max(self.creativity);
@@ -277,7 +301,7 @@ impl<'a> Inference<'a> {
 
         // Create a new sampler with an incremented seed to ensure new results after restoring a checkpoint.
         self.seed = self.seed.wrapping_add(1);
-        self.sampler = new_sampler(self.creativity, self.seed);
+        self.sampler = new_sampler_standard(self.creativity, self.seed);
     }
 
     /// Reset the inference job, clearing the context and other internal states.
@@ -425,7 +449,7 @@ impl<'a> Inference<'a> {
 
         // Generate the reasoning trace if reasoning is enabled, otherwise we push an empty reasoning trace
         let reasoning_trace = if reasoning {
-            let trace = self.think(None);
+            let trace = self.think(Some(32768));
             if trace.is_empty() { None } else { Some(trace) }
         } else {
             self.no_think();
@@ -462,7 +486,7 @@ impl<'a> Inference<'a> {
             if self.tokens_since_last_creativity_nudge >= CREATIVITY_NUDGE_DOWN_EVERY_N {
                 self.creativity =
                     (self.creativity * (CREATIVITY_DOWN_DIVISOR - 1.0)) / CREATIVITY_DOWN_DIVISOR;
-                self.sampler = new_sampler(self.creativity, self.seed);
+                self.sampler = new_sampler_standard(self.creativity, self.seed);
                 self.tokens_since_last_creativity_nudge = 1;
             } else {
                 self.tokens_since_last_creativity_nudge += 1;
@@ -470,6 +494,7 @@ impl<'a> Inference<'a> {
 
             // Generate the next token
             let token = self.sampler.sample(&self.context, -1);
+            self.sampler.accept(token);
 
             // Exit early if the token is an end-of-sequence token
             if self.model().is_eog_token(token) {
