@@ -130,6 +130,7 @@ impl<'a> Chat<'a> {
     pub fn infer_response_ext<R>(
         &mut self,
         use_reasoning: bool,
+        reasoning_prefix: Option<&str>,
         mut func: impl FnMut(&mut Inference<'a>, Option<String>) -> R,
     ) -> R {
         // Compact the context if it exceeds the context size limit
@@ -141,7 +142,7 @@ impl<'a> Chat<'a> {
         // Start the response to the queued messages, which also puts them into the context
         let reasoning = self
             .inference
-            .start_response_to_messages(&queued_messages, use_reasoning);
+            .start_response_to_messages(&queued_messages, use_reasoning, reasoning_prefix);
 
         // Call the provided function with the inference and reasoning trace
         let response = func(&mut self.inference, reasoning);
@@ -169,7 +170,7 @@ impl<'a> Chat<'a> {
     ) -> ChatResponse {
         let context_size_limit = self.context_size_limit as usize;
         
-        self.infer_response_ext(use_reasoning, |inference, reasoning| {
+        self.infer_response_ext(use_reasoning, None, |inference, reasoning| {
             // Begin the message with the prefix, if any
             if let Some(prefix) = &prefix {
                 inference.push_text(prefix);

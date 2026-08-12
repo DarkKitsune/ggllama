@@ -18,6 +18,8 @@ const CREATIVITY_UP_DIVISOR: f32 = 4.0;
 /// When restoring a checkpoint, creativity is temporarily raised then reduced again after this many tokens.
 /// This is to encourage creativity and avoid the model getting stuck in a loop of repeating the same output after restoring a checkpoint.
 const CHECKPOINT_RESTORE_CREATIVITY_GRACE: usize = 24;
+/// How far back the DRY (Don't Repeat Yourself) sampler looks for repeated tokens.
+const DRY_PENALTY_LAST_N: i32 = 16384 + 256;
 
 /*
 /// Helper function to create a new adaptive sampler.
@@ -36,27 +38,30 @@ fn new_sampler_adaptive(creativity: f32, seed: u32) -> LlamaSampler {
         1.0 - creativity * 0.5
     };
 
+    // top_k will be 15 at creativity = 0.0 and 30 at creativity = 1.0
+    let top_k = 15 + (15.0 * creativity) as i32;
+
     // Create adaptive sampler which only samples tokens that aren't very unlikely
     LlamaSampler::chain_simple([
+        LlamaSampler::top_k(top_k),
         LlamaSampler::min_p(min_probability, 1),
         LlamaSampler::adaptive_p(target_probability, 0.9, seed),
     ])
 }*/
 
 /// Helper function to create a new standard sampler.
-/// `temperature = creativity`
-fn new_sampler_standard(creativity: f32, seed: u32) -> LlamaSampler {
-    // Clamp creativity to the range [0.0, 1.5]
-    let creativity = creativity.clamp(0.0, 1.5);
+fn new_sampler_standard(temperature: f32, seed: u32) -> LlamaSampler {
+    // Clamp temperature to the range [0.0, 1.5]
+    let temperature = temperature.clamp(0.0, 1.5);
 
-    // Calculate a mininum probability based on creativity
-    let min_probability = 0.1 + 0.05 * (1.0 - creativity); // 0.15 at creativity 0.0, 0.1 at creativity 1.0
+    // top_k will be 15 at temperature = 0.0 and 30 at temperature = 1.0
+    let top_k = 15 + (15.0 * temperature) as i32;
 
-    // Create standard sampler which only samples tokens that aren't very unlikely
+    // Create sampler chain which only samples tokens that aren't very unlikely
     LlamaSampler::chain_simple([
-        LlamaSampler::top_k(40),
-        LlamaSampler::min_p(min_probability, 1),
-        LlamaSampler::temp(creativity),
+        LlamaSampler::top_n_sigma(1.0),
+        LlamaSampler::top_k(top_k),
+        LlamaSampler::temp(temperature),
         LlamaSampler::dist(seed)
     ])
 }
@@ -420,6 +425,7 @@ impl<'a> Inference<'a> {
         &mut self,
         messages: impl IntoIterator<Item = &'b ChatMessage>,
         reasoning: bool,
+        reasoning_prefix: Option<&str>,
     ) -> Option<String> {
         // Clear the stored response text and outputs before messages and reasoning are processed
         self.response_text.clear();
@@ -449,7 +455,7 @@ impl<'a> Inference<'a> {
 
         // Generate the reasoning trace if reasoning is enabled, otherwise we push an empty reasoning trace
         let reasoning_trace = if reasoning {
-            let trace = self.think(Some(32768));
+            let trace = self.think(Some(32768), reasoning_prefix);
             if trace.is_empty() { None } else { Some(trace) }
         } else {
             self.no_think();
@@ -627,15 +633,57 @@ impl<'a> Inference<'a> {
 
         // Parse the result as JSON if requested, otherwise insert as a string.
         if parse_json {
-            // If the result starts with '"' but doesn't end with '"', then we probably have a malformed JSON string, so we insert the closing '"' and parse again
-            if result.starts_with('"') && !result.ends_with('"') {
-                result.push('"');
-            }
+            let parsed = serde_json::from_str(&result);
+            
+            match parsed {
+                Ok(value) => {
+                    self.outputs.insert(
+                        name.clone(),
+                        value,
+                    );
+                }
+                Err(_) => {
+                    // If the result starts with '"' but doesn't end with '"', then we probably have a malformed JSON string, so we insert the closing '"' and parse again
+                    if result.starts_with('"') && !result.ends_with('"') {
+                        result.push('"');
 
-            self.outputs.insert(
-                name.clone(),
-                serde_json::from_str(&result).unwrap_or(Value::String(result)),
-            );
+                        let parsed = serde_json::from_str(&result);
+                        match parsed {
+                            Ok(value) => {
+                                self.outputs.insert(
+                                    name.clone(),
+                                    value,
+                                );
+                            }
+                            Err(_) => {
+                                self.outputs.insert(name.clone(), Value::String(result[..result.len() - 1].to_string()));
+                            }
+                        }
+                    }
+                    else {
+                        // If the result ends with '"' but doesn't start with '"', then we probably have a malformed JSON string, so we insert the starting '"' and parse again
+                        if result.ends_with('"') && !result.starts_with('"') {
+                            result.insert(0, '"');
+
+                            let parsed = serde_json::from_str(&result);
+                            match parsed {
+                                Ok(value) => {
+                                    self.outputs.insert(
+                                        name.clone(),
+                                        value,
+                                    );
+                                }
+                                Err(_) => {
+                                    self.outputs.insert(name.clone(), Value::String(result[1..].to_string()));
+                                }
+                            }
+                        }
+                        else {
+                            self.outputs.insert(name.clone(), Value::String(result));
+                        }
+                    }
+                }
+            }
         } else {
             self.outputs.insert(name.clone(), Value::String(result));
         }
@@ -645,12 +693,17 @@ impl<'a> Inference<'a> {
     }
 
     /// Generate a reasoning trace in the context, and return the string.
-    pub(crate) fn think(&mut self, max_tokens: Option<usize>) -> String {
+    pub(crate) fn think(&mut self, max_tokens: Option<usize>, prefix: Option<&str>) -> String {
         // Start the <think> block
         if self.use_gemma_channels {
             self.push_text("<|channel>thought");
         } else {
             self.push_text("<think>");
+        }
+
+        // If a prefix is provided, push it into the context before generating the reasoning trace.
+        if let Some(prefix) = prefix {
+            self.push_text(prefix);
         }
 
         // Generate the next `n` tokens, stopping if we generate the </think> token, then convert them to a string and return it.
@@ -703,15 +756,31 @@ impl<'a> Inference<'a> {
     }
 
     /// Infer the contents of a channel/block with the given name
-    pub fn infer_channel(&mut self, channel_name: &str, max_tokens: Option<usize>) -> String {
+    pub fn infer_channel(&mut self, channel_name: &str, max_tokens: Option<usize>, prefix: Option<&str>) -> String {
         let content = if self.use_gemma_channels {
+            // Push the opening tag for the channel into the context.
             self.push_text(&format!("<|channel>{}\n", channel_name));
+
+            // If a prefix is provided, push it into the context before generating the reasoning trace.
+            if let Some(prefix) = prefix {
+                self.push_text(prefix);
+            }
+
+            // Generate the content of the channel/block.
             self.infer(max_tokens, &["<channel|>"])
                 .content_without_stop_sequence()
                 .trim()
                 .to_string()
         } else {
+            // Push the opening tag for the channel into the context.
             self.push_text(&format!("<{}>\n", channel_name));
+
+            // If a prefix is provided, push it into the context before generating the reasoning trace.
+            if let Some(prefix) = prefix {
+                self.push_text(prefix);
+            }
+
+            // Generate the content of the channel/block.
             self.infer(max_tokens, &[&format!("</{}>", channel_name)])
                 .content_without_stop_sequence()
                 .trim()

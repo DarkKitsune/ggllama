@@ -297,7 +297,7 @@ impl DirectoryEnvironment {
             ))
         }
     }
-    
+    /*
     /// Initializes a cargo project in the directory wrapped by this environment with the given name, version, and description.
     pub fn init_cargo_project(&mut self, name: &str, version: &str) -> Result<()> {
         // Generate the Cargo.toml contents
@@ -311,7 +311,7 @@ impl DirectoryEnvironment {
         self.write_file("src/main.rs", "fn main() {\n    println!(\"Hello, world!\");\n}\n", false)?;
         
         Ok(())
-    }
+    }*/
 
     /// Runs the cargo project in the directory wrapped by this environment and returns the output.
     pub fn run_cargo_project(&self) -> Result<String> {
@@ -384,10 +384,25 @@ impl DirectoryEnvironment {
 
 impl Environment for DirectoryEnvironment {
     fn environment_prompt(&self) -> String {
+        let files = self
+            .get_all_files_and_directories(".")
+            .into_iter()
+            .map(|s| s.display().to_string())
+            .collect::<Vec<_>>();
+        let file_list_string = if files.is_empty() {
+            "The environment directory is currently empty.".to_string()
+        } else {
+            format!("\nThe environment directory contains the following files and subdirectories:\n- `{}`", files.join("`\n- `"))
+        };
+
         format!(
-            "The environment is a directory in a file system.\n\
+            "The environment is a directory in a file system. \
+            You may read or write files within the environment directory, \
+            but you may not do anything with files outside of the directory in any way.\n\
+            {}\n\
             {}",
             self.description,
+            file_list_string,
         )
     }
 
@@ -396,11 +411,11 @@ impl Environment for DirectoryEnvironment {
             // Function to get files in a given relative path within the environment directory.
             Function::new(
                 "list_dir",
-                "Get all files and subdirectories in the environment directory and all of its subdirectories, recursively, \
-                 as a list of relative paths.",
+                "Gets all files and subdirectories in the environment directory and all of its subdirectories, recursively, \
+                 as a list of relative paths. If there are no files, an empty list is returned.",
                 vec![],
                 vec![],
-                |env: &mut DirectoryEnvironment, args: &JsonMap| {
+                |env: &mut DirectoryEnvironment, _args: &JsonMap| {
                     Ok(map! {
                         "files" => env.get_all_files_and_directories(".")
                     })
@@ -409,7 +424,7 @@ impl Environment for DirectoryEnvironment {
             // Function to read the contents of a file in the environment directory.
             Function::new(
                 "read_file",
-                "Read the contents of a file in the environment directory.",
+                "Reads the contents of a file in the environment directory.",
                 vec![FunctionParameter::new(
                     "relative_path",
                     ParameterType::String,
@@ -430,7 +445,7 @@ impl Environment for DirectoryEnvironment {
             // Function to write contents to a file in the environment directory.
             Function::new(
                 "write_file",
-                "Write contents to a file in the environment directory. Overwrite the file if it already exists.",
+                "Writes contents to a file in the environment directory. This will overwrite the file if it already exists.",
                 vec![
                     FunctionParameter::new("relative_path", ParameterType::String, "The relative path to the file within the environment directory."),
                     FunctionParameter::new("file_contents", ParameterType::Any, "The contents to write to the file."),
@@ -461,7 +476,7 @@ impl Environment for DirectoryEnvironment {
             // Function to replace a substring in a file in the environment directory with a new substring.
             Function::new(
                 "edit_file",
-                "Replace the first occurrence of `target` with `replacement` in a file.",
+                "Replaces the first occurrence of `target` with `replacement` in a file.",
                 vec![
                     FunctionParameter::new("relative_path", ParameterType::String, "The relative path to the file within the environment directory."),
                     FunctionParameter::new("target", ParameterType::String, "The substring to be replaced in the file."),
@@ -505,22 +520,16 @@ impl Environment for DirectoryEnvironment {
 
             // Function to run a Python script in the environment directory.
             Function::new(
-                "execute_python_file",
-                "Execute the Python script file under `relative_path` in the environment directory. Use to test Python code.",
-                vec![
-                    FunctionParameter::new("relative_path", ParameterType::String, "The relative path to the Python script within the environment directory."),
-                ],
+                "python_run",
+                "Runs main.py in the environment directory. \
+                Use this function to execute the Python project in the environment directory (if any).",
+                vec![],
                 vec![
                     Capability::Python,
                     Capability::FileExecute,
                 ],
                 |env: &mut DirectoryEnvironment, args: &JsonMap| {
-                    let file_path = args
-                        .get("relative_path")
-                        .ok_or(anyhow::anyhow!("Missing argument: relative_path"))?
-                        .as_str()
-                        .ok_or(anyhow::anyhow!("Argument 'relative_path' is not a string"))?;
-                    let result = env.run_python(file_path);
+                    let result = env.run_python("main.py");
 
                     match result {
                         Ok(output) => Ok(map! {
@@ -534,41 +543,10 @@ impl Environment for DirectoryEnvironment {
                     }
                 },
             ),
-            
-            // Function to initialize a cargo project in the environment directory with a given name, version, and description.
-            Function::new(
-                "init_cargo_project",
-                "Initialize a new cargo project in the environment directory, for Rust code.",
-                vec![
-                    FunctionParameter::new("name", ParameterType::String, "The name of the cargo project."),
-                    FunctionParameter::new("version", ParameterType::String, "The version of the cargo project."),
-                ],
-                vec![
-                    Capability::Rust,
-                    Capability::FileWrite,
-                ],
-                |env: &mut DirectoryEnvironment, args: &JsonMap| {
-                    let name = args
-                        .get("name")
-                        .ok_or(anyhow::anyhow!("Missing argument: name"))?
-                        .as_str()
-                        .ok_or(anyhow::anyhow!("Argument 'name' is not a string"))?;
-                    let version = args
-                        .get("version")
-                        .ok_or(anyhow::anyhow!("Missing argument: version"))?
-                        .as_str()
-                        .ok_or(anyhow::anyhow!("Argument 'version' is not a string"))?;
-                    env.init_cargo_project(name, version)?;
-
-                    Ok(map! {
-                        "status" => "success"
-                    })
-                },
-            ),
             // Function to run the cargo project in the environment directory.
             Function::new(
-                "run_cargo_project",
-                "Run the cargo project in the environment directory. Used to test Rust code.",
+                "cargo_run",
+                "Compiles the Rust code in the environment directory and test runs it.",
                 vec![],
                 vec![
                     Capability::Rust,
@@ -591,8 +569,8 @@ impl Environment for DirectoryEnvironment {
             ),
             // Function to run an NPM command in the environment directory.
             Function::new(
-                "run_npm_command",
-                "Run the given NPM command in the environment director.",
+                "npm_run",
+                "Runs the given NPM command in the environment director.",
                 vec![
                     FunctionParameter::new("args", ParameterType::Array, "The arguments to pass to the NPM command."),
                 ],

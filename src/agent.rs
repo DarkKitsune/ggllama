@@ -324,7 +324,7 @@ pub trait Environment: Sized {
         let mut functions = self.get_allowed_functions(capabilities);
         functions.push(Function::new(
             "finish",
-            "Finishes the current task with the given result or summary.",
+            "Finishes the current task with the given result or summary. Call this when the task is complete to notify the user.",
             vec![FunctionParameter {
                 name: "result".to_string(),
                 param_type: ParameterType::String,

@@ -6,7 +6,7 @@ use llama_cpp_4::{
 use static_init::dynamic;
 
 use crate::{
-    agent::{Environment, Function}, chat::Chat, inference::Inference, pipeline::Pipeline, prompt_formatter::{ListSection, PromptFormatter, TextSection}, util::{JsonMap, JsonValue}, wlog,
+    agent::{Environment, Function}, chat::Chat, dlog, inference::Inference, pipeline::Pipeline, prompt_formatter::{ListSection, PromptFormatter, TextSection}, util::{JsonMap, JsonValue}, wlog,
 };
 
 #[dynamic]
@@ -17,11 +17,11 @@ static BACKEND: LlamaBackend = LlamaBackend::init().unwrap();
 pub enum CompressionLevel {
     /// No compression, using FP16 for the KV cache as the model's weights.
     None,
-    /// Low compression. Reduces memory usage slightly, with minimal impact on quality.
+    /// Low compression. Reduces memory usage by a decent amount, with minimal impact on quality.
     Low,
-    /// Medium compression. Much less memory usage with very little impact on quality.
+    /// Medium compression. Reduces memory usage by even more with moderate impact on quality in some cases.
     Medium,
-    /// Significant VRAM reduction, but may result in noticably worse quality in some cases.
+    /// High compression. Reduces memory usage even further, with a more noticeable impact on quality.
     High,
 }
 
@@ -44,7 +44,10 @@ impl Core {
         use_gemma_format: bool,
     ) -> Self {
         // Set up model params
-        let params = LlamaModelParams::default().with_n_gpu_layers(200);
+        let params = LlamaModelParams::default()
+            .with_n_gpu_layers(200)
+            // No support for MTP (yet)
+            .with_load_mtp(false);
 
         // Load the model
         let model = LlamaModel::load_from_file(&BACKEND, model_path, &params).unwrap();
@@ -74,14 +77,14 @@ impl Core {
             .with_n_ctx(Some(NonZeroU32::new(context_size).expect("context_size must be non-zero")))
             .with_n_batch(4096)
             .with_cache_type_k(match self.compression {
-                CompressionLevel::High => GgmlType::Q4_1,
+                CompressionLevel::High => GgmlType::Q5_1,
                 CompressionLevel::Medium => GgmlType::Q8_0,
-                CompressionLevel::Low => GgmlType::F16,
+                CompressionLevel::Low => GgmlType::Q8_0,
                 CompressionLevel::None => GgmlType::F16,
             })
             .with_cache_type_v(match self.compression {
-                CompressionLevel::High => GgmlType::Q4_1,
-                CompressionLevel::Medium => GgmlType::Q8_0,
+                CompressionLevel::High => GgmlType::Q5_1,
+                CompressionLevel::Medium => GgmlType::Q5_1,
                 CompressionLevel::Low => GgmlType::Q8_0,
                 CompressionLevel::None => GgmlType::F16,
             });
@@ -160,6 +163,7 @@ impl Core {
             &[],
             Some(max_size),
             false,
+            None,
             use_small_model,
         )
     }
@@ -219,6 +223,7 @@ impl Core {
             &[],
             None,
             use_reasoning,
+            None,
             use_small_model,
         )
     }
@@ -327,6 +332,7 @@ impl Core {
             &[],
             None,
             use_reasoning,
+            None,
             use_small_model,
         )
     }
@@ -491,6 +497,7 @@ Be creative, let every character have a chance to shine, and keep the story inte
             &[],
             None,
             use_reasoning,
+            None,
             use_small_model,
         )
     }
@@ -613,6 +620,7 @@ Be creative, let every character have a chance to shine, and keep the story inte
             &[],
             None,
             use_reasoning,
+            None,
             use_small_model
         )
     }
@@ -641,8 +649,8 @@ Be creative, let every character have a chance to shine, and keep the story inte
                     format!(
                         "You are an intelligent agent that can perform tasks in a virtual environment. \
                         You are very knowledgeable in many areas including science, technology, and the arts.\n\
-                        The user will provide you with a task for you to perform. Plan out how you will complete the task, then put that plan into action.\n\
-                        Once the task is complete, you should call `finish` with the result or summary of the task as the argument.\n\
+                        The user will provide you with a task for you to perform. Plan out how you will complete the task, \
+                        then put that plan into action using tool calls. The available functions for a tool call are listed below in the \"Functions\" section.\n\
                         The current state of the environment is as follows:\n```\n{}\n```",
                         environment_string
                     )
@@ -650,21 +658,21 @@ Be creative, let every character have a chance to shine, and keep the story inte
                 .with_section(TextSection::new(
                     Some("Functions".to_string()),
                     format!(
-"You may call any of the available functions to complete the task. Call only one function per turn.
-The available functions for you to call are listed below within <tools></tools> XML tags:
+"Call only one function per response; do not call multiple functions simultaneously.
+Think about what function you should call next and what arguments need to be passed to it, before you call it.
+You may call any of the functions below within <tools></tools> XML tags:
 <tools>
 ```
 {}
 ```
 </tools>
 
-You should use XML format for all function calls, between <tool_call> and </tool_call> XML tags. \
+You should use XML format for all tool calls, between <tool_call> and </tool_call> XML tags.
 Use <function=function_name></function> XML tags to specify the function being called, \
 and <parameter=parameter_name></parameter> XML tags to specify the arguments for the function, \
 with the argument value placed between the opening and closing tags.
 
-
-**Example function call:**
+**Example assistant response with a tool call:**
 ```
 <tool_call>
 <function=example_function>
@@ -747,6 +755,7 @@ with the argument value placed between the opening and closing tags.
             &[],
             Some(131072),
             true,
+            None,
             false,
         )
     }
