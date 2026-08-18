@@ -11,7 +11,8 @@ fn main() {
     // Initialize the core with the model and some KV cache quantization/compression
     let core = Core::from_model(
         "models/qwen3.5-9b-qworus-Q5_K_L-imat-GGUF.gguf",
-        CompressionLevel::Medium,
+        None,
+        CompressionLevel::Low,
         false,
     );
 
@@ -36,7 +37,7 @@ fn main() {
         Function::new(
             "read_file",
             "Reads the contents of the file under `file_name`",
-            vec![FunctionParameter::new("file_name", ParameterType::String)],
+            vec![FunctionParameter::new("file_name", ParameterType::String, "The name of the file to read")],
             vec![],
             |env: &mut BasicEnvironment<HashMap<String, String>>, args| {
                 let file_name = args
@@ -57,8 +58,8 @@ fn main() {
             "write_file",
             "Writes the given content to the file under `file_name`. If the file does not exist, it will be created.",
             vec![
-                FunctionParameter::new("file_name", ParameterType::String),
-                FunctionParameter::new("content", ParameterType::String),
+                FunctionParameter::new("file_name", ParameterType::String, "The name of the file to write to"),
+                FunctionParameter::new("content", ParameterType::String, "The content to write to the file"),
             ],
             vec![],
             |env: &mut BasicEnvironment<HashMap<String, String>>, args| {
@@ -98,6 +99,7 @@ fn main() {
         "Create a basic Python game with a ball bouncing around the screen at 60 FPS. \
         The ball should change color every time it bounces off the walls. \
         Comment your code appropriately.",
+        Some("agent_log_1.md".as_ref())
     );
 
     dlog!(!"Finished initial writing!\nResult:\n{}", result);
@@ -105,15 +107,8 @@ fn main() {
     // Have them then make an edit to the game
     let result = agent.run(
         &mut environment,
-        "Please edit my bouncing ball python game so that there's a particle effect whenever the ball bounces off a wall."
-    );
-
-    dlog!(!"Finished editing!\nResult:\n{}", result);
-
-    // Have them fix & refactor the game
-    let result = agent.run(
-        &mut environment,
-        "Please fix any bugs in the Python code for my bouncing ball game. Make sure there are no syntax errors."
+        "Please edit my bouncing ball python game so that there's a particle effect whenever the ball bounces off a wall.",
+        Some("agent_log_2.md".as_ref())
     );
 
     dlog!(!"Finished editing!\nResult:\n{}", result);
