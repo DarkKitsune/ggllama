@@ -1,7 +1,7 @@
-use std::{fmt::Display, time::SystemTime};
+use std::{fmt::Display, io::{self, Write}, time::SystemTime};
 
 use llama_cpp_4::{
-    context::LlamaContext, llama_batch::LlamaBatch, model::{AddBos, LlamaChatMessage, LlamaModel, Special}, mtp::MtpSession, sampling::LlamaSampler, token::LlamaToken,
+    context::LlamaContext, llama_batch::LlamaBatch, model::{AddBos, LlamaChatMessage, LlamaModel, Special}, sampling::LlamaSampler, token::LlamaToken,
 };
 use serde_json::Value;
 
@@ -18,8 +18,45 @@ const CREATIVITY_UP_DIVISOR: f32 = 4.0;
 /// When restoring a checkpoint, creativity is temporarily raised then reduced again after this many tokens.
 /// This is to encourage creativity and avoid the model getting stuck in a loop of repeating the same output after restoring a checkpoint.
 const CHECKPOINT_RESTORE_CREATIVITY_GRACE: usize = 24;
-/// How far back the DRY (Don't Repeat Yourself) sampler looks for repeated tokens.
-const DRY_PENALTY_LAST_N: i32 = 16384 + 256;
+
+/// Represents a suffix that can be conditionally appended to inference output and then inferred after.
+/// This allows steering the model's output programmatically.
+/// The suffix will not be applied if the target text already contains the suffix text, to avoid inducing repetition in the model output.
+pub struct Suffix {
+    /// The text content of the suffix to be appended to inference output.
+    pub text: String,
+    /// The trigger text that must be present for the suffix to be applied.
+    pub trigger_with: Option<String>,
+    /// The trigger text that must not be present for the suffix to be applied.
+    pub trigger_without: Option<String>,
+}
+
+impl Suffix {
+    /// Creates a new `Suffix` instance with the given text and optional triggers.
+    pub fn new(text: String, trigger_with: Option<String>, trigger_without: Option<String>) -> Self {
+        Self {
+            text,
+            trigger_with,
+            trigger_without,
+        }
+    }
+
+    /// Checks if the suffix should be applied based on the given text.
+    pub fn should_apply(&self, text: &str) -> bool {
+        // Return false early if the text already contains the suffix text, to avoid inducing repetition in the model output.
+        if text.contains(&self.text) {
+            return false;
+        }
+        // Check if the suffix should be applied based on the presence or absence of trigger texts.
+        if let Some(trigger_with) = &self.trigger_with && !text.contains(trigger_with) {
+            return false;
+        }
+        if let Some(trigger_without) = &self.trigger_without && text.contains(trigger_without) {
+            return false;
+        }
+        true
+    }
+}
 
 /*
 /// Helper function to create a new adaptive sampler.
@@ -51,16 +88,12 @@ fn new_sampler_adaptive(creativity: f32, seed: u32) -> LlamaSampler {
 
 /// Helper function to create a new standard sampler.
 fn new_sampler_standard(temperature: f32, seed: u32) -> LlamaSampler {
-    // Clamp temperature to the range [0.0, 1.5]
-    let temperature = temperature.clamp(0.0, 1.5);
-
-    // top_k will be 15 at temperature = 0.0 and 30 at temperature = 1.0
-    let top_k = 15 + (15.0 * temperature) as i32;
+    // Clamp temperature to the range [0.0, 2.0]
+    let temperature = temperature.clamp(0.0, 2.0);
 
     // Create sampler chain which only samples tokens that aren't very unlikely
     LlamaSampler::chain_simple([
         LlamaSampler::top_n_sigma(1.0),
-        LlamaSampler::top_k(top_k),
         LlamaSampler::temp(temperature),
         LlamaSampler::dist(seed)
     ])
@@ -390,11 +423,16 @@ impl<'a> Inference<'a> {
 
     /// Queue text to be added to the context before the next generation call.
     pub fn push_text(&mut self, text: impl Display) {
+        let string = text.to_string();
+        
         // Store the text in the response text
-        self.response_text.push_str(&text.to_string());
+        self.response_text.push_str(&string);
 
         // Append the text to the queued text before it is moved into the context
-        self.queued_text.push_str(&text.to_string());
+        self.queued_text.push_str(&string);
+
+        print!("{}", string);
+        io::stdout().flush().unwrap();
     }
 
     /// Push tokens into the context. This should not be used during a message response unless you know what you are doing.
@@ -419,13 +457,40 @@ impl<'a> Inference<'a> {
         }
     }
 
+    /// Removes a given number of tokens and characters from the context and internal states.
+    /// This should *only* be used during a message response unless you know what you are doing.
+    /// It may also be required to push more text before inferring again, to initialize logits properly.
+    pub(crate) fn pop_from_end(&mut self, token_count: usize, char_count: usize) {
+        // We need to properly handle queued text first
+        if !self.queued_text.is_empty() {
+            self.unqueue_to_context(true);
+        }
+
+        // Remove tokens from self.tokens
+        for _ in 0..token_count {
+            self.tokens.pop();
+        }
+
+        // Remove tokens from the context itself
+        let largest_idx = self.context.kv_cache_seq_pos_max(0) as u32;
+        let success = self.context.clear_kv_cache_seq(Some(0), Some(largest_idx - token_count as u32 + 1), Some(largest_idx + 1)).unwrap();
+        if !success {
+            panic!("Failed to clear KV cache sequence {} to {}", largest_idx - token_count as u32 + 1, largest_idx + 1);
+        }
+
+        // Remove characters from the response text
+        for _ in 0..char_count {
+            self.response_text.pop();
+        }
+    }
+
     /// Queue messages to be added to the context, then begin the assistant response to said messages.
     /// If `reasoning` is true, then the model will generate a reasoning trace and return it.
     pub(crate) fn start_response_to_messages<'b>(
         &mut self,
         messages: impl IntoIterator<Item = &'b ChatMessage>,
         reasoning: bool,
-        reasoning_prefix: Option<&str>,
+        reasoning_suffix: Option<&Suffix>,
     ) -> Option<String> {
         // Clear the stored response text and outputs before messages and reasoning are processed
         self.response_text.clear();
@@ -455,7 +520,7 @@ impl<'a> Inference<'a> {
 
         // Generate the reasoning trace if reasoning is enabled, otherwise we push an empty reasoning trace
         let reasoning_trace = if reasoning {
-            let trace = self.think(Some(32768), reasoning_prefix);
+            let trace = self.think(reasoning_suffix);
             if trace.is_empty() { None } else { Some(trace) }
         } else {
             self.no_think();
@@ -532,6 +597,10 @@ impl<'a> Inference<'a> {
                     // Save the truncated token string to the response text
                     self.response_text.push_str(truncated_token_str);
 
+                    // Print the truncated token string to the console for debugging purposes
+                    print!("{}", &truncated_token_str);
+                    io::stdout().flush().unwrap();
+
                     // Convert the truncated token string back to one or more tokens, so that we can decode it into the context
                     let truncated_tokens = self
                         .model()
@@ -557,7 +626,6 @@ impl<'a> Inference<'a> {
                     break;
                 }
             }
-
             // If we found a stop sequence, break this loop too.
             if encountered_stop_sequence.is_some() {
                 break;
@@ -565,6 +633,10 @@ impl<'a> Inference<'a> {
 
             // Append the token string to the response text
             self.response_text.push_str(&token_str);
+
+            // Print the token string to the console for debugging purposes
+            print!("{}", &token_str);
+            io::stdout().flush().unwrap();
 
             // Set the batch contents to the token and position of the generated token, with logits initialized
             self.batch.clear();
@@ -693,7 +765,7 @@ impl<'a> Inference<'a> {
     }
 
     /// Generate a reasoning trace in the context, and return the string.
-    pub(crate) fn think(&mut self, max_tokens: Option<usize>, prefix: Option<&str>) -> String {
+    pub(crate) fn think(&mut self, suffix: Option<&Suffix>) -> String {
         // Start the <think> block
         if self.use_gemma_channels {
             self.push_text("<|channel>thought");
@@ -701,46 +773,62 @@ impl<'a> Inference<'a> {
             self.push_text("<think>");
         }
 
-        // If a prefix is provided, push it into the context before generating the reasoning trace.
-        if let Some(prefix) = prefix {
-            self.push_text(prefix);
-        }
+        // Decide on the correct closing tag
+        let closing_tag = if self.use_gemma_channels {
+            "<channel|>"
+        } else {
+            "</think>"
+        };
 
-        // Generate the next `n` tokens, stopping if we generate the </think> token, then convert them to a string and return it.
+        // Generate tokens, stopping if we generate the closing tag, then convert them to a string and store it.
         let mut result = self
             .infer(
-                max_tokens,
-                if self.use_gemma_channels {
-                    &["<channel|>"]
-                } else {
-                    &["</think>"]
-                },
+                None,
+                &[closing_tag],
             )
-            .content;
+            .content_without_stop_sequence()
+            .trim()
+            .to_string();
 
-        // If we got the full trace then truncate the result to remove the </think> token
-        let ends_with_think = if self.use_gemma_channels {
-            result.ends_with("<channel|>")
-        } else {
-            result.ends_with("</think>")
-        };
-        if ends_with_think {
-            if self.use_gemma_channels {
-                result.truncate(result.rfind("<channel|>").unwrap());
+        // Insert suffix if provided (and if it applies) and then infer after it
+        if let Some(suffix) = suffix && suffix.should_apply(&result) {
+            // Get the text of the suffix.
+            // If the original reasoning trace was empty then trim the beginning of the suffix to avoid unnecessary leading whitespace.
+            let suffix_text = if result.is_empty() {
+                suffix.text.trim_start()
             } else {
-                result.truncate(result.rfind("</think>").unwrap());
+                &suffix.text
+            };
+
+            // First roll back the context to remove the closing tag token(s)
+            let tokens_to_roll_back = self.model().str_token_count(closing_tag, AddBos::Never).unwrap();
+            let chars_to_roll_back = closing_tag.chars().count();
+            self.pop_from_end(tokens_to_roll_back, chars_to_roll_back);
+
+            // Then, push the suffix into the context and result string.
+            self.push_text(suffix_text);
+            result.push_str(suffix_text);
+
+            // Then, infer til the closing tag or the beginning of a tool call.
+            let after_suffix = self.infer(None, &[closing_tag, "<tool_call>"]);
+
+            // If the inference stopped at a tool call tag then we must roll back to remove the tool call from the context,
+            // and then push in a closing tag to properly close the reasoning trace.
+            if after_suffix.encountered_stop_sequence.as_ref().map(|s| s.as_str()) == Some("<tool_call>") {
+                // Roll back the context to remove the tool call
+                let tokens_to_roll_back = self.model().str_token_count("<tool_call>", AddBos::Never).unwrap();
+                let chars_to_roll_back = "<tool_call>".chars().count();
+                self.pop_from_end(tokens_to_roll_back, chars_to_roll_back);
+
+                // Push in a closing tag to properly close the reasoning trace
+                self.push_text(closing_tag);
             }
+
+            // Finally, append the content generated after the suffix to the result string.
+            result.push_str(after_suffix.content_without_stop_sequence());
         }
 
-        // If we didn't get the full trace, push the </think> token into the context to properly terminate the trace in the context. This is important for accurate token counting and for properly formatting the context for future generations.
-        if !ends_with_think {
-            if self.use_gemma_channels {
-                self.push_text("<channel|>");
-            } else {
-                self.push_text("</think>");
-            }
-        }
-
+        // Finally, a newline
         self.push_text("\n");
 
         result.trim().to_string()

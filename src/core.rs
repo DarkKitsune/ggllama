@@ -6,11 +6,19 @@ use llama_cpp_4::{
 use static_init::dynamic;
 
 use crate::{
-    agent::{Environment, Function}, chat::Chat, dlog, inference::Inference, pipeline::Pipeline, prompt_formatter::{ListSection, PromptFormatter, TextSection}, util::{JsonMap, JsonValue}, wlog,
+    agent::{Capability, Environment, Function}, chat::Chat, inference::{Inference, Suffix}, pipeline::Pipeline, prompt_formatter::{ListSection, PromptFormatter, TextSection}, util::{JsonMap, JsonValue}, wlog,
 };
 
+/// The number of recurrent states to store from a context's KV cache.
+/// For models that use recurrent layers, the KV cache may be rolled back by up to this many tokens.
+const NUM_RECURRENT_STATES: u32 = 4;
+
 #[dynamic]
-static BACKEND: LlamaBackend = LlamaBackend::init().unwrap();
+static BACKEND: LlamaBackend = {
+    let mut backend = LlamaBackend::init().unwrap();
+    backend.void_logs();
+    backend
+};
 
 /// Defines how much to compress the context's KV cache for an inference job. Higher values will use less VRAM, but may result in worse performance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -62,6 +70,7 @@ impl Core {
 
     /// Creates a new context with the specified parameters. Also creates a draft context if MTP is enabled.
     fn new_context<'a>(&'a self, ctx_params: LlamaContextParams, use_small_model: bool) -> LlamaContext<'a> {
+        let ctx_params = ctx_params.with_n_rs_seq(NUM_RECURRENT_STATES);
         if use_small_model {
             self.small_model.as_ref().unwrap().new_context(&BACKEND, ctx_params.clone()).unwrap()
         } else {
@@ -630,8 +639,11 @@ Be creative, let every character have a chance to shine, and keep the story inte
     /// If continuing the task, the input hashmap should omit the "task" key.
     /// The function name for that turn will be provided under the "function_name" key in the output hashmap, and the arguments for that function will be provided under their names.
     /// The agent will have access to a set of functions that it can call to interact with the environment.
-    pub fn new_agent_pipeline<'a, E: Environment>(&'a self, environment: &E, creativity: f32, functions: impl Into<Vec<Function<E>>>) -> Pipeline<'a> {
+    pub fn new_agent_pipeline<'a, E: Environment>(&'a self, environment: &E, creativity: f32, language_capabilities: impl Into<Vec<Capability>>, functions: impl Into<Vec<Function<E>>>) -> Pipeline<'a> {
+        const CONTEXT_SIZE: u32 = 80000;
+
         let functions = functions.into();
+        let language_capabilities = language_capabilities.into();
 
         let function_jsons = functions
             .iter()
@@ -640,21 +652,33 @@ Be creative, let every character have a chance to shine, and keep the story inte
             .join("\n\n");
 
         /// Defines the structure of the system prompt.
-        fn agent_system(formatter: PromptFormatter, environment_string: &str, function_jsons: &str) -> PromptFormatter {
-            println!("Environment String: {}", environment_string);
-            println!("Function JSONs: {}", function_jsons);
-            formatter
+        fn agent_system(formatter: PromptFormatter, environment_string: &str, function_jsons: &str, language_capabilities: &[Capability]) -> PromptFormatter {
+            let mut prompt = formatter
                 .with_section(TextSection::new(
                     Some("Your Role".to_string()),
                     format!(
                         "You are an intelligent agent that can perform tasks in a virtual environment. \
                         You are very knowledgeable in many areas including science, technology, and the arts.\n\
                         The user will provide you with a task for you to perform. Plan out how you will complete the task, \
-                        then put that plan into action using tool calls. The available functions for a tool call are listed below in the \"Functions\" section.\n\
+                        then put that plan into action using tool calls.\n\
+                        The available functions for a tool call are listed below in the `Functions` section.\n\
                         The current state of the environment is as follows:\n```\n{}\n```",
                         environment_string
                     )
-                ))
+                ));
+
+            // Add coding section if the agent can write code
+            if language_capabilities.iter().any(|capability| capability.can_code()) {
+                prompt = prompt.with_section(TextSection::new(
+                    Some("Coding".to_string()),
+                    "You have the ability to write and (possibly) execute code within this environment. \
+                    If you write code then it should be well-structured, efficient, and adhere to best practices. \
+                    Thoroughly comment and document any code you write, so that other agents who aren't as skilled can understand it.\n\
+                    Write design documents before implementation, and update them as needed.",
+                ));
+            }
+
+            prompt
                 .with_section(TextSection::new(
                     Some("Functions".to_string()),
                     format!(
@@ -667,6 +691,7 @@ You may call any of the functions below within <tools></tools> XML tags:
 ```
 </tools>
 
+Use the `end_task` function once you have finished doing the given task, in order to notify the user that you are done.
 You should use XML format for all tool calls, between <tool_call> and </tool_call> XML tags.
 Use <function=function_name></function> XML tags to specify the function being called, \
 and <parameter=parameter_name></parameter> XML tags to specify the arguments for the function, \
@@ -697,7 +722,7 @@ with the argument value placed between the opening and closing tags.
             // If the input contains a "task" key, include it in the prompt.
             if let Some(task) = inputs.get("task") {
                 Some(formatter.with_section(TextSection::new(
-                    Some("Task".to_string()),
+                    None,
                     task,
                 )))
             }
@@ -738,24 +763,34 @@ with the argument value placed between the opening and closing tags.
             inference.push_text("</function>\n</tool_call>");
         }
 
+        // Create a mapping from function names to their parameter names for use in the agent output function.
         let function_params = functions
             .iter()
             .map(|f| (f.name.clone(), f.parameters.iter().map(|p| p.name.clone()).collect::<Vec<_>>()))
             .collect::<HashMap<_, _>>();
 
+        // Get the environment prompt as a string to pass to the agent system function.
+        let environment_string = environment.environment_prompt(&language_capabilities);
+
         // Create the pipeline
-        let environment_string = environment.environment_prompt();
         Pipeline::new(
             self,
             creativity,
             true,
-            move |formatter| agent_system(formatter, &environment_string, &function_jsons),
+            move |formatter| agent_system(formatter, &environment_string, &function_jsons, &language_capabilities),
             agent_input,
             move |inference, inputs| agent_output(inference, inputs, &function_params),
             &[],
-            Some(131072),
+            Some(CONTEXT_SIZE),
             true,
-            None,
+            Some(
+                Suffix::new(
+                    "\nLet me plan out the 1 function call for this response:\n\
+                    - Function name: `".to_string(),
+                    None,
+                    Some("function call for".to_string()),
+                )
+            ),
             false,
         )
     }

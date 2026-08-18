@@ -1,10 +1,7 @@
 use std::fmt::{Debug, Display};
 
 use crate::{
-    core::Core,
-    inference::{Inference, InferenceCheckpoint},
-    map,
-    util::JsonMap,
+    core::Core, inference::{Inference, InferenceCheckpoint, Suffix}, map, util::JsonMap,
 };
 
 /// The chat compacts its own context if it exceeds this many tokens
@@ -130,7 +127,7 @@ impl<'a> Chat<'a> {
     pub fn infer_response_ext<R>(
         &mut self,
         use_reasoning: bool,
-        reasoning_prefix: Option<&str>,
+        reasoning_suffix: Option<&Suffix>,
         mut func: impl FnMut(&mut Inference<'a>, Option<String>) -> R,
     ) -> R {
         // Compact the context if it exceeds the context size limit
@@ -142,7 +139,7 @@ impl<'a> Chat<'a> {
         // Start the response to the queued messages, which also puts them into the context
         let reasoning = self
             .inference
-            .start_response_to_messages(&queued_messages, use_reasoning, reasoning_prefix);
+            .start_response_to_messages(&queued_messages, use_reasoning, reasoning_suffix);
 
         // Call the provided function with the inference and reasoning trace
         let response = func(&mut self.inference, reasoning);

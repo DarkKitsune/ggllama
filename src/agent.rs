@@ -17,7 +17,18 @@ pub enum Capability {
     JavaScript,
     FileWrite,
     FileExecute,
+    SpawnSubAgent(Vec<Capability>),
     Other(String),
+}
+
+impl Capability {
+    /// Returns `true` if the capability is a coding one.
+    pub fn can_code(&self) -> bool {
+        match self {
+            Capability::Python | Capability::Rust | Capability::JavaScript => true,
+            _ => false,
+        }
+    }
 }
 
 impl Display for Capability {
@@ -28,6 +39,7 @@ impl Display for Capability {
             Capability::FileWrite => write!(f, "modifying files"),
             Capability::FileExecute => write!(f, "executing files"),
             Capability::JavaScript => write!(f, "working with JavaScript code and Node.js"),
+            Capability::SpawnSubAgent(_) => write!(f, "spawning sub-agents with specific capabilities"),
             Capability::Other(s) => write!(f, "{}", s),
         }
     }
@@ -303,7 +315,7 @@ pub trait Environment: Sized {
     fn available_functions(&self) -> Vec<Function<Self>>;
 
     /// Describes the environment as if speaking to the agent. For example, "The project folder of my top-down shooter game."
-    fn environment_prompt(&self) -> String;
+    fn environment_prompt(&self, capabilities: &[Capability]) -> String;
 
     /// Gets the functions which an agent with the given capabilities is allowed to execute in this environment.
     fn get_allowed_functions(&self, capabilities: &[Capability]) -> Vec<Function<Self>> {
@@ -318,13 +330,13 @@ pub trait Environment: Sized {
             .collect()
     }
 
-    /// Gets the functions which an agent with the given capabilities is allowed to execute in this environment, plus the "finish" function.
-    fn get_allowed_functions_with_finish(&self, capabilities: &[Capability]) -> Vec<Function<Self>> {
-        // Get the allowed functions for the agent's capabilities and add the "finish" function.
+    /// Gets the functions which an agent with the given capabilities is allowed to execute in this environment, plus the system functions.
+    fn get_allowed_functions_with_system_functions(&self, capabilities: &[Capability]) -> Vec<Function<Self>> {
         let mut functions = self.get_allowed_functions(capabilities);
         functions.push(Function::new(
-            "finish",
-            "Finishes the current task with the given result or summary. Call this when the task is complete to notify the user.",
+            "end_task",
+            "Mark the current task as complete, and notify the user with the given result or summary. \
+            This should be the last call you make, once the task is complete.",
             vec![FunctionParameter {
                 name: "result".to_string(),
                 param_type: ParameterType::String,
@@ -345,7 +357,7 @@ pub trait Environment: Sized {
         args: &Map<String, serde_json::Value>,
     ) -> Result<FunctionResult> {
         // Get the allowed functions for the agent's capabilities
-        let allowed_functions = self.get_allowed_functions_with_finish(capabilities);
+        let allowed_functions = self.get_allowed_functions_with_system_functions(capabilities);
 
         // Check if the function is allowed, otherwise return an error
         if let Some(func) = allowed_functions.iter().find(|f| f.name == name) {
@@ -401,7 +413,7 @@ impl<T> Environment for BasicEnvironment<T> {
         self.functions.clone()
     }
 
-    fn environment_prompt(&self) -> String {
+    fn environment_prompt(&self, _capabilities: &[Capability]) -> String {
         self.environment_prompt.clone()
     }
 }
@@ -419,7 +431,7 @@ impl<'a, E: Environment> Agent<'a, E> {
     /// Creates a new agent with capabilities in the given environment.
     pub fn new(core: &'a Core, environment: &E, creativity: f32, capabilities: Vec<Capability>) -> Self {
         // Create an agent pipeline
-        let mut pipeline = core.new_agent_pipeline(environment, creativity, environment.get_allowed_functions_with_finish(&capabilities));
+        let mut pipeline = core.new_agent_pipeline(environment, creativity, capabilities.clone(), environment.get_allowed_functions_with_system_functions(&capabilities));
 
         // Get a checkpoint of the pipeline's chat so that we can reset it after each run.
         let checkpoint = pipeline.chat_mut().create_checkpoint();
@@ -430,6 +442,11 @@ impl<'a, E: Environment> Agent<'a, E> {
             capabilities,
             _phantom: PhantomData,
         }
+    }
+
+    /// Returns `true` if the agent has coding capabilities.
+    pub fn can_code(&self) -> bool {
+        self.capabilities.iter().any(|cap| cap.can_code())
     }
 
     /// Gives the agent a task and informs it of the available functions, then runs the agent until it has completed its task or reached a stopping condition.
@@ -515,8 +532,8 @@ impl<'a, E: Environment> Agent<'a, E> {
                 .join(", ");
             dlog!("Agent tried calling function: {}({})", function_name, arg_list);
 
-            // If the function is "finish", return
-            if function_name == "finish" {
+            // If the function is "end_task", return
+            if function_name == "end_task" {
                 break serde_json::Value::Object(arguments);
             }
 
@@ -541,12 +558,13 @@ impl<'a, E: Environment> Agent<'a, E> {
                     // Convert the result to a pretty JSON string for logging and feeding back into the agent
                     let content = serde_json::to_string_pretty(&result_json).unwrap();
 
+                    /*
                     // Log the function result
                     if successful {
                         dlog!("Function '{}' executed successfully:\n{}", function_name, content);
                     } else {
                         wlog!("Function '{}' failed:\n{}", function_name, content);
-                    }
+                    }*/
 
                     // Push the function result to the chat
                     chat.push_message(ChatRole::Function, content);

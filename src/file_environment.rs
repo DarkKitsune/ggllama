@@ -78,9 +78,9 @@ impl DirectoryEnvironment {
                     }
                 }
 
-                // Skip the protected environment.json file and .agents.md file, which are both protected
+                // Skip the protected environment.json file and git related files/folders, which are all protected
                 if let Some(file_name) = path.file_name().map(|n| n.to_string_lossy()) {
-                    if file_name == "environment.json" || file_name == ".agents.md" {
+                    if file_name == "environment.json" || file_name == ".git" || file_name == ".gitignore" {
                         continue;
                     }
                 }
@@ -119,10 +119,10 @@ impl DirectoryEnvironment {
             ));
         }
 
-        // Ensure that the file is not environment.json or .agents.md, which are both protected
+        // Ensure that the file is not environment.json or git related files, which are protected
         if !allow_protected {
             if let Some(file_name) = full_path.file_name().map(|n| n.to_string_lossy()) {
-                if file_name == "environment.json" || file_name == ".agents.md" {
+                if file_name == "environment.json" || file_name == ".git" || file_name == ".gitignore" {
                     return Err(anyhow::anyhow!(
                         "Attempted to read a protected environment file: {}",
                         full_path.display()
@@ -182,10 +182,10 @@ impl DirectoryEnvironment {
             ));
         }
 
-        // Ensure that the file is not environment.json or .agents.md, which are both protected
+        // Ensure that the file is not environment.json or git-related files which are protected
         if !allow_protected {
             if let Some(file_name) = full_path.file_name().map(|n| n.to_string_lossy()) {
-                if file_name == "environment.json" || file_name == ".agents.md" {
+                if file_name == "environment.json" || file_name == ".git" || file_name == ".gitignore" {
                     return Err(anyhow::anyhow!(
                         "Attempted to write to a protected environment file: {}",
                         full_path.display()
@@ -275,10 +275,10 @@ impl DirectoryEnvironment {
             ));
         }
 
-        // Ensure that the file is not environment.json, which is protected
-        if full_path.file_name().map(|n| n.to_string_lossy()) == Some("environment.json".into()) {
+        // Ensure that the path ends with a .py extension.
+        if full_path.extension().map(|ext| ext.to_string_lossy()) != Some("py".into()) {
             return Err(anyhow::anyhow!(
-                "Attempted to run a protected environment file: {}",
+                "Attempted to run a non-Python file: {}",
                 full_path.display()
             ));
         }
@@ -383,7 +383,7 @@ impl DirectoryEnvironment {
 }
 
 impl Environment for DirectoryEnvironment {
-    fn environment_prompt(&self) -> String {
+    fn environment_prompt(&self, _capabilities: &[Capability]) -> String {
         let files = self
             .get_all_files_and_directories(".")
             .into_iter()
@@ -528,7 +528,7 @@ impl Environment for DirectoryEnvironment {
                     Capability::Python,
                     Capability::FileExecute,
                 ],
-                |env: &mut DirectoryEnvironment, args: &JsonMap| {
+                |env: &mut DirectoryEnvironment, _args: &JsonMap| {
                     let result = env.run_python("main.py");
 
                     match result {
