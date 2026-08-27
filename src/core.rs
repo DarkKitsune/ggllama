@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt::Display, num::NonZeroU32, path::Path};
+use std::{fmt::Display, num::NonZeroU32, path::Path};
 
 use llama_cpp_4::{
     context::{LlamaContext, params::{LlamaContextParams, LlamaFlashAttnType}}, llama_backend::LlamaBackend, model::{LlamaModel, params::LlamaModelParams}, quantize::GgmlType,
@@ -6,7 +6,7 @@ use llama_cpp_4::{
 use static_init::dynamic;
 
 use crate::{
-    agent::{Capability, Environment, Function}, chat::Chat, inference::{Inference, Suffix}, pipeline::Pipeline, prompt_formatter::{ListSection, PromptFormatter, TextSection}, util::{JsonMap, JsonValue}, wlog,
+    agent::{Capability, Environment, Function}, chat::Chat, inference::{Inference}, pipeline::Pipeline, prompt_formatter::{ListSection, PromptFormatter, TextSection}, util::{JsonMap, JsonValue}, wlog,
 };
 
 /// The number of recurrent states to store from a context's KV cache.
@@ -20,6 +20,42 @@ static BACKEND: LlamaBackend = {
     backend
 };
 
+/// Represents the level of reasoning effort that should be applied for an inference job.
+/// Not all models will show a difference between Low, Medium and High, but None will always disable reasoning.
+/// Use medium if unsure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReasoningLevel {
+    None,
+    Low,
+    Medium,
+    High,
+}
+
+impl ReasoningLevel {
+    /// Get the prompt string corresponding to the reasoning level.
+    pub fn get_prompt(&self) -> Option<&str> {
+        match self {
+            ReasoningLevel::None => None,
+            ReasoningLevel::Low => Some("Reasoning effort is set to low. Keep your thinking brief and focused, \
+                moving directly to the conclusion without unnecessary elaboration."),
+            ReasoningLevel::Medium => None,
+            ReasoningLevel::High => Some("Reasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, \
+                consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer."),
+        }
+    }
+
+    /// Get whether reasoning is enabled for this level.
+    pub fn is_reasoning_enabled(&self) -> bool {
+        !matches!(self, ReasoningLevel::None)
+    }
+}
+
+impl Default for ReasoningLevel {
+    fn default() -> Self {
+        ReasoningLevel::Medium
+    }
+}
+
 /// Defines how much to compress the context's KV cache for an inference job. Higher values will use less VRAM, but may result in worse performance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CompressionLevel {
@@ -27,27 +63,28 @@ pub enum CompressionLevel {
     None,
     /// Low compression. Reduces memory usage by a decent amount, with minimal impact on quality.
     Low,
-    /// Medium compression. Reduces memory usage by even more with moderate impact on quality in some cases.
-    Medium,
     /// High compression. Reduces memory usage even further, with a more noticeable impact on quality.
     High,
+}
+
+impl Default for CompressionLevel {
+    fn default() -> Self {
+        CompressionLevel::Low
+    }
 }
 
 /// Forms the core of gglama, handling loading models and providing the main API for interaction.
 pub struct Core {
     pub model: LlamaModel,
-    /// Optional smaller model which can be used for tasks that don't need much intelligence, such as sumarization and choosing between options.
-    pub small_model: Option<LlamaModel>,
     pub compression: CompressionLevel,
     pub use_gemma_format: bool,
 }
 
 impl Core {
     /// Loads a LLaMA model from the specified path and initializes a `Core` from it.
-    /// `use_mtp` indicates whether to use MTP. Requires the model to support MTP. If a small model is provided, it must also support MTP.
+    /// `use_gemma_format` indicates whether to use the Gemma format for the model.
     pub fn from_model<P: AsRef<Path>>(
         model_path: P,
-        small_model_path: Option<P>,
         context_compression: CompressionLevel,
         use_gemma_format: bool,
     ) -> Self {
@@ -62,54 +99,42 @@ impl Core {
 
         Self {
             model,
-            small_model: small_model_path.map(|path| LlamaModel::load_from_file(&BACKEND, path, &params).unwrap()),
             compression: context_compression,
             use_gemma_format,
         }
     }
 
     /// Creates a new context with the specified parameters. Also creates a draft context if MTP is enabled.
-    fn new_context<'a>(&'a self, ctx_params: LlamaContextParams, use_small_model: bool) -> LlamaContext<'a> {
+    fn new_context<'a>(&'a self, ctx_params: LlamaContextParams) -> LlamaContext<'a> {
         let ctx_params = ctx_params.with_n_rs_seq(NUM_RECURRENT_STATES);
-        if use_small_model {
-            self.small_model.as_ref().unwrap().new_context(&BACKEND, ctx_params.clone()).unwrap()
-        } else {
-            self.model.new_context(&BACKEND, ctx_params.clone()).unwrap()
-        }
+        self.model.new_context(&BACKEND, ctx_params.clone()).unwrap()
     }
 
     /// Starts a new inference job with a new context.
     /// The `creativity` parameter controls the randomness of the generated output, with higher values resulting in more creative responses.
-    pub fn infer<'a>(&'a self, creativity: f32, seed: Option<u32>, context_size: u32, use_small_model: bool) -> Inference<'a> {
+    pub fn infer<'a>(&'a self, creativity: f32, seed: Option<u32>, context_size: u32) -> Inference<'a> {
         let ctx_params = LlamaContextParams::default()
             .with_flash_attn_type(LlamaFlashAttnType::Enabled)
             .with_n_ctx(Some(NonZeroU32::new(context_size).expect("context_size must be non-zero")))
             .with_n_batch(4096)
             .with_cache_type_k(match self.compression {
-                CompressionLevel::High => GgmlType::Q5_1,
-                CompressionLevel::Medium => GgmlType::Q8_0,
+                CompressionLevel::High => GgmlType::Q8_0,
                 CompressionLevel::Low => GgmlType::Q8_0,
                 CompressionLevel::None => GgmlType::F16,
             })
             .with_cache_type_v(match self.compression {
-                CompressionLevel::High => GgmlType::Q5_1,
-                CompressionLevel::Medium => GgmlType::Q5_1,
+                CompressionLevel::High => GgmlType::Q4_0,
                 CompressionLevel::Low => GgmlType::Q8_0,
                 CompressionLevel::None => GgmlType::F16,
             });
-        let context = self.new_context(ctx_params, use_small_model);
+        let context = self.new_context(ctx_params);
         
-        Inference::new(self, context, vec![], creativity, seed, use_small_model)
+        Inference::new(self, context, vec![], creativity, seed)
     }
 
     /// Get a reference to the model.
     pub(crate) fn model(&self) -> &LlamaModel {
         &self.model
-    }
-
-    /// Get a reference to the small model, if it exists.
-    pub(crate) fn small_model(&self) -> Option<&LlamaModel> {
-        self.small_model.as_ref()
     }
 }
 
@@ -122,15 +147,14 @@ impl Core {
         creativity: f32,
         seed: Option<u32>,
         context_size: Option<u32>,
-        use_small_model: bool,
     ) -> Chat<'_> {
-        Chat::new(self, system_prompt.to_string(), creativity, seed, context_size.unwrap_or(65536), use_small_model)
+        Chat::new(self, system_prompt.to_string(), creativity, seed, context_size.unwrap_or(65536))
     }
 
     /// Creates a new pipeline for summarizing text.
     /// The text to summarize should be provided as \"input\" in the input hashmap.
     /// The output of the summarization will be provided as \"output\" in the output hashmap.
-    pub fn new_summarizer<'a>(&'a self, max_size: u32, use_small_model: bool) -> Pipeline<'a> {
+    pub fn new_summarizer<'a>(&'a self, max_size: u32) -> Pipeline<'a> {
         /// Defines the structure of the system prompt.
         fn summarization_system(formatter: PromptFormatter) -> PromptFormatter {
             formatter
@@ -156,7 +180,7 @@ impl Core {
         }
 
         /// Defines the structure of the output.
-        fn summarization_output(inference: &mut Inference, _inputs: &JsonMap) {
+        fn summarization_output(inference: &mut Inference, _inputs: &JsonMap, _reasoning: Option<String>) {
             inference.push_text("Here is the summarized text:\n```\n");
             inference.infer_output("output", &["```"], false);
         }
@@ -171,16 +195,15 @@ impl Core {
             summarization_output,
             &[],
             Some(max_size),
-            false,
+            ReasoningLevel::None,
             None,
-            use_small_model,
         )
     }
 
     /// Creates a new pipeline for generating JSON based on a given template.
     /// The input hashmap should contain a "template" key with the JSON template and a "prompt" key with the prompt for the JSON object.
     /// The output will be provided under the "output" key in the output hashmap.
-    pub fn new_json_builder<'a>(&'a self, use_reasoning: bool, use_small_model: bool) -> Pipeline<'a> {
+    pub fn new_json_builder<'a>(&'a self, reasoning_level: ReasoningLevel) -> Pipeline<'a> {
         /// Defines the structure of the system prompt.
         fn json_builder_system(formatter: PromptFormatter) -> PromptFormatter {
             formatter
@@ -216,7 +239,7 @@ impl Core {
         }
 
         /// Defines the structure of the output.
-        fn json_builder_output(inference: &mut Inference, _inputs: &JsonMap) {
+        fn json_builder_output(inference: &mut Inference, _inputs: &JsonMap, _reasoning: Option<String>) {
             inference.push_text("## JSON Output\n```json\n");
             inference.infer_output("output", &["```"], true);
         }
@@ -231,9 +254,8 @@ impl Core {
             json_builder_output,
             &[],
             None,
-            use_reasoning,
+            reasoning_level,
             None,
-            use_small_model,
         )
     }
 
@@ -245,8 +267,6 @@ impl Core {
     pub fn new_multiple_choice<'a>(
         &'a self,
         role: impl Display + 'static,
-        use_reasoning: bool,
-        use_small_model: bool,
     ) -> Pipeline<'a> {
         /// Map options to letters (A, B, C, ...)
         const IDX_TO_LETTER: [char; 26] = [
@@ -290,7 +310,7 @@ impl Core {
         }
 
         /// Defines the structure of the output.
-        fn multiple_choice_output(inference: &mut Inference, inputs: &JsonMap) {
+        fn multiple_choice_output(inference: &mut Inference, inputs: &JsonMap, _reasoning: Option<String>) {
             // Format the output as a JSON object containing the answer letter.
             inference.push_text("```json\n{\"answer\": \"");
 
@@ -340,9 +360,8 @@ impl Core {
             multiple_choice_output,
             &[],
             None,
-            use_reasoning,
+            ReasoningLevel::None,
             None,
-            use_small_model,
         )
     }
 
@@ -350,7 +369,7 @@ impl Core {
     /// This pipeline will determine the next action or dialogue turn for characters, or the next narration turn in the scene based on the current state and inputs.
     /// The input for this pipeline should include a key "scene" with the string representation of the scene as its value,
     /// and a key "controllable_characters" with an array of character names that can be controlled by the scene writer.
-    pub fn new_scene_writer<'a>(&'a self, creativity: f32, use_reasoning: bool, use_small_model: bool) -> Pipeline<'a> {
+    pub fn new_scene_writer<'a>(&'a self, creativity: f32, reasoning_level: ReasoningLevel) -> Pipeline<'a> {
         /// Defines the structure of the system prompt.
         fn scene_writer_system(formatter: PromptFormatter) -> PromptFormatter {
             formatter
@@ -407,7 +426,7 @@ Be creative, let every character have a chance to shine, and keep the story inte
         }
 
         /// Defines the structure of the output.
-        fn scene_writer_output(inference: &mut Inference, inputs: &JsonMap) {
+        fn scene_writer_output(inference: &mut Inference, inputs: &JsonMap, _reasoning: Option<String>) {
             // Get the controllable_characters from inputs
             let controllable_characters = inputs["controllable_characters"]
                 .as_array()
@@ -505,9 +524,8 @@ Be creative, let every character have a chance to shine, and keep the story inte
             scene_writer_output,
             &[],
             None,
-            use_reasoning,
+            reasoning_level,
             None,
-            use_small_model,
         )
     }
 
@@ -517,7 +535,7 @@ Be creative, let every character have a chance to shine, and keep the story inte
     /// "character" which is the name of the character from whose perspective the command should be parsed into a turn.
     /// The outputs of this pipeline are the keys "turn_type" and "content" in a JSON object,
     /// representing the type of turn, and the content of the turn, respectively.
-    pub fn new_turn_extractor<'a>(&'a self, creativity: f32, use_reasoning: bool, use_small_model: bool) -> Pipeline<'a> {
+    pub fn new_turn_extractor<'a>(&'a self, creativity: f32, reasoning_level: ReasoningLevel) -> Pipeline<'a> {
         /// Defines the structure of the system prompt
         fn turn_extractor_system(formatter: PromptFormatter) -> PromptFormatter {
             formatter
@@ -566,7 +584,7 @@ Be creative, let every character have a chance to shine, and keep the story inte
         }
 
         /// Defines the structure of the output
-        fn turn_extractor_output(inference: &mut Inference, inputs: &JsonMap) {
+        fn turn_extractor_output(inference: &mut Inference, inputs: &JsonMap, _reasoning: Option<String>) {
             // Extract the character's name from the inputs for later use.
             let character_name = inputs["character"].as_str().unwrap().trim();
 
@@ -628,9 +646,8 @@ Be creative, let every character have a chance to shine, and keep the story inte
             turn_extractor_output,
             &[],
             None,
-            use_reasoning,
+            reasoning_level,
             None,
-            use_small_model
         )
     }
 
@@ -639,79 +656,70 @@ Be creative, let every character have a chance to shine, and keep the story inte
     /// If continuing the task, the input hashmap should omit the "task" key.
     /// The function name for that turn will be provided under the "function_name" key in the output hashmap, and the arguments for that function will be provided under their names.
     /// The agent will have access to a set of functions that it can call to interact with the environment.
-    pub fn new_agent_pipeline<'a, E: Environment>(&'a self, environment: &E, creativity: f32, language_capabilities: impl Into<Vec<Capability>>, functions: impl Into<Vec<Function<E>>>) -> Pipeline<'a> {
-        const CONTEXT_SIZE: u32 = 80000;
+    /// If `use_xhigh_reasoning` is set to true and a model supports it (such as Qwen3.8-27B), the agent will employ an advanced reasoning strategy for decision making.
+    pub fn new_agent_pipeline<'a, E: Environment>(&'a self, environment: &E, creativity: f32, reasoning_level: ReasoningLevel, language_capabilities: impl Into<Vec<Capability>>, functions: impl Into<Vec<Function<E>>>) -> Pipeline<'a> {
+        const CONTEXT_SIZE: u32 = 130000;
 
         let functions = functions.into();
         let language_capabilities = language_capabilities.into();
 
         let function_jsons = functions
             .iter()
-            .map(|f| f.to_qwen_xml())
+            .map(|f| serde_json::to_string_pretty(&f.to_json()).unwrap())
             .collect::<Vec<_>>()
             .join("\n\n");
 
         /// Defines the structure of the system prompt.
         fn agent_system(formatter: PromptFormatter, environment_string: &str, function_jsons: &str, language_capabilities: &[Capability]) -> PromptFormatter {
+            // Role & environment section
             let mut prompt = formatter
                 .with_section(TextSection::new(
-                    Some("Your Role".to_string()),
+                    None,
                     format!(
-                        "You are an intelligent agent that can perform tasks in a virtual environment. \
+                        "You are an intelligent agent that can perform tasks in a virtual environment. \n\
                         You are very knowledgeable in many areas including science, technology, and the arts.\n\
-                        The user will provide you with a task for you to perform. Plan out how you will complete the task, \
-                        then put that plan into action using tool calls.\n\
-                        The available functions for a tool call are listed below in the `Functions` section.\n\
+                        You are confident and efficient, and you don't spend unnecessary time on trivial details; \
+                        quick action is better than overthinking.\n\
                         The current state of the environment is as follows:\n```\n{}\n```",
                         environment_string
                     )
                 ));
 
-            // Add coding section if the agent can write code
+            // Coding section if the agent can write code
             if language_capabilities.iter().any(|capability| capability.can_code()) {
                 prompt = prompt.with_section(TextSection::new(
-                    Some("Coding".to_string()),
-                    "You have the ability to write and (possibly) execute code within this environment. \
-                    If you write code then it should be well-structured, efficient, and adhere to best practices. \
-                    Thoroughly comment and document any code you write, so that other agents who aren't as skilled can understand it.\n\
-                    Write design documents before implementation, and update them as needed.",
+                    None,
+                    "You have the ability to write code within this environment.\n\
+                    Thoroughly comment any code you write, ensuring that less experienced programmers can read it.\n\
+                    If making a game or interface, or even a game level, make sure that everything is well-spaced and visually appealing, \
+                    using the available window/screen space, with a natural flow.\n\
+                    Feel free to use **appealing colors, styling, vector graphics, rounded corners, and other modern visual elements** where applicable, to make the product stand out!",
                 ));
             }
 
+            // Function calls section
             prompt
                 .with_section(TextSection::new(
-                    Some("Functions".to_string()),
+                    None,
                     format!(
-"Call only one function per response; do not call multiple functions simultaneously.
-Think about what function you should call next and what arguments need to be passed to it, before you call it.
+"You may use 1 tool call to call 1 function per turn to assist you.
+You should use JSON format for all tool calls, between <tool_call> and </tool_call> XML tags.
 You may call any of the functions below within <tools></tools> XML tags:
 <tools>
 ```
 {}
 ```
 </tools>
+Do not include any additional text outside of the <tool_call> tags.
 
-Use the `end_task` function once you have finished doing the given task, in order to notify the user that you are done.
-You should use XML format for all tool calls, between <tool_call> and </tool_call> XML tags.
-Use <function=function_name></function> XML tags to specify the function being called, \
-and <parameter=parameter_name></parameter> XML tags to specify the arguments for the function, \
-with the argument value placed between the opening and closing tags.
-
-**Example assistant response with a tool call:**
-```
+Example response with a tool call:
 <tool_call>
-<function=example_function>
-<parameter=example_param1>
-\"value1\"
-</parameter>
-<parameter=example_param2>
 {{
-    \"key\": 78
+    \"name\": \"example_function\",
+    \"arguments\": {{\"param1\": \"value1\"}}
 }}
-</parameter>
-</function>
 </tool_call>
-```",
+",
                         function_jsons
                     )
                 ))
@@ -721,10 +729,14 @@ with the argument value placed between the opening and closing tags.
         fn agent_input(formatter: PromptFormatter, inputs: &JsonMap) -> Option<PromptFormatter> {
             // If the input contains a "task" key, include it in the prompt.
             if let Some(task) = inputs.get("task") {
-                Some(formatter.with_section(TextSection::new(
-                    None,
-                    task,
-                )))
+                Some(
+                    formatter
+                    // Task section
+                    .with_section(TextSection::new(
+                        None,
+                        task.as_str().unwrap(),
+                    ))
+                )
             }
             // If the input does not contain a "task" key, return None to not pass a user prompt to the model. This will allow the model to continue the task from the previous turn.
             else {
@@ -733,41 +745,54 @@ with the argument value placed between the opening and closing tags.
         }
 
         /// Defines the structure of the output.
-        fn agent_output(inference: &mut Inference, _inputs: &JsonMap, function_params: &HashMap<String, Vec<String>>) {
-            // Begin by pushing the function call XML tag and beginning the function tag. The function name will be inferred by the model.
-            inference.push_text("<tool_call>\n<function=");
+        fn agent_output(inference: &mut Inference, _inputs: &JsonMap, _reasoning: Option<String>) {
+            // Begin by pushing the opening tool call tag
+            inference.push_text("<tool_call>\n");
 
-            // Infer the function name and closing bracket for the function tag.
-            let function_name = inference.infer_output("function_name", &[">"], false).0.as_str().unwrap_or_default().to_string();
-            
-            // Newline after tag
-            inference.push_text("\n");
+            // Set a checkpoint in case the tool call cannot parse
+            let checkpoint = inference.create_checkpoint();
 
-            // If the function exists, loop over its parameters and infer those
-            if let Some(function_params) = function_params.get(&function_name) {
-                // Loop over the parameters and infer each one
-                for param_name in function_params {
+            // Loop until a valid JSON object representing the tool call is inferred.
+            let tool_call = loop {
+                // Infer a JSON object representing the tool call
+                let tool_call_json_result = inference.infer_json();
+
+                // If the JSON object could not be parsed, restore the checkpoint and continue the loop
+                if tool_call_json_result.is_err() {
+                    inference.restore_checkpoint(checkpoint.clone());
                     
-                    // Push the parameter tag
-                    inference.push_text(&format!("<parameter={}>\n", param_name));
+                    // Debug tag showing the user that we had to redo the tool call
+                    print!("\n<REDO_TOOL>\n");
 
-                    // Infer the parameter with JSON parsing and close the parameter tag
-                    inference.infer_output(param_name, &["</parameter>"], true);
-
-                    // Newline after closing tag
-                    inference.push_text("\n");
+                    continue;
                 }
-            }
 
-            // Close the function and tool call tags
-            inference.push_text("</function>\n</tool_call>");
+                // Successfully parsed the JSON object, break the loop with the parsed value.
+                break tool_call_json_result.unwrap();
+            };
+
+            // Close the tool call tag after a newline
+            inference.push_text("\n</tool_call>\n");
+            
+            // Extract the function name from the tool call JSON object under "name", falling back on "function_name" and "function" if "name" wasn't found.
+            let function_name = tool_call.get("name")
+                .or_else(|| tool_call.get("function_name"))
+                .or_else(|| tool_call.get("function"))
+                .and_then(|v| v.as_str())
+                .expect("Function name not found in tool call JSON object");
+
+            // Set the function name as an output for the agent to use.
+            inference.set_output("function_name", function_name.into());
+
+            // Extract the arguments from the tool call JSON object under "arguments", falling back on "parameters" if "arguments" wasn't found.
+            let arguments = tool_call.get("arguments")
+                .or_else(|| tool_call.get("parameters"))
+                .cloned()
+                .expect("Arguments not found in tool call JSON object");
+
+            // Set the extracted arguments as an output for the agent to use.
+            inference.set_output("arguments", arguments);
         }
-
-        // Create a mapping from function names to their parameter names for use in the agent output function.
-        let function_params = functions
-            .iter()
-            .map(|f| (f.name.clone(), f.parameters.iter().map(|p| p.name.clone()).collect::<Vec<_>>()))
-            .collect::<HashMap<_, _>>();
 
         // Get the environment prompt as a string to pass to the agent system function.
         let environment_string = environment.environment_prompt(&language_capabilities);
@@ -779,19 +804,11 @@ with the argument value placed between the opening and closing tags.
             true,
             move |formatter| agent_system(formatter, &environment_string, &function_jsons, &language_capabilities),
             agent_input,
-            move |inference, inputs| agent_output(inference, inputs, &function_params),
+            agent_output,
             &[],
             Some(CONTEXT_SIZE),
-            true,
-            Some(
-                Suffix::new(
-                    "\nLet me plan out the 1 function call for this response:\n\
-                    - Function name: `".to_string(),
-                    None,
-                    Some("function call for".to_string()),
-                )
-            ),
-            false,
+            reasoning_level,
+            None,
         )
     }
 }

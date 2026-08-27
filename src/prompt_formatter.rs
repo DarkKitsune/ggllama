@@ -191,7 +191,7 @@ impl PromptFormatter {
                 None => s.render(data),
             })
             .collect::<Vec<_>>()
-            .join("\n\n---\n\n")
+            .join("\n\n")
     }
 
     /// Returns self with the given section added.

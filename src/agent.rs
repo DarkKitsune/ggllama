@@ -3,10 +3,10 @@ use std::{
 };
 
 use anyhow::Result;
-use serde_json::Map;
+use serde_json::{Map, Value};
 
 use crate::{
-    chat::{ChatCheckpoint, ChatRole}, core::Core, dlog, map, pipeline::Pipeline, wlog,
+    chat::{ChatCheckpoint, ChatRole}, core::{Core, ReasoningLevel}, dlog, map, pipeline::Pipeline, wlog,
 };
 
 /// A capability that an agent can have, which can be used to determine what the agent is allowed to do.
@@ -210,7 +210,11 @@ impl<E: Environment> Function<E> {
         let params: Vec<_> = self
             .parameters
             .iter()
-            .map(|p| p.name.clone())
+            .map(|p| serde_json::json!({
+                "name": p.name,
+                "description": p.description,
+                "type": p.param_type.to_string(),
+            }))
             .collect();
 
         serde_json::json!({
@@ -228,7 +232,7 @@ impl<E: Environment> Function<E> {
             .map(|p| format!("<parameter={}>\n{} ({})\n</parameter>", p.name, p.description, p.param_type))
             .collect();
 
-        let description_string = format!("\n<description>\n{}\n</description>\n", self.description);
+        //let description_string = format!("\n<description>\n{}\n</description>\n", self.description);
 
         let params_string = if params.is_empty() {
             String::new()
@@ -237,9 +241,9 @@ impl<E: Environment> Function<E> {
         };
 
         format!(
-            "<function={}>{}{}</function>",
+            "<function={}>{}</function>",
             self.name,
-            description_string,
+            //description_string,
             params_string,
         )
     }
@@ -336,7 +340,8 @@ pub trait Environment: Sized {
         functions.push(Function::new(
             "end_task",
             "Mark the current task as complete, and notify the user with the given result or summary. \
-            This should be the last call you make, once the task is complete.",
+            This should be the last call you make, once the task is complete, or if you have reached a stopping condition and cannot continue. \
+            The result or summary should be a concise description of what was accomplished, or the reason why the task could not be completed.",
             vec![FunctionParameter {
                 name: "result".to_string(),
                 param_type: ParameterType::String,
@@ -429,9 +434,9 @@ pub struct Agent<'a, E: Environment> {
 
 impl<'a, E: Environment> Agent<'a, E> {
     /// Creates a new agent with capabilities in the given environment.
-    pub fn new(core: &'a Core, environment: &E, creativity: f32, capabilities: Vec<Capability>) -> Self {
+    pub fn new(core: &'a Core, environment: &E, creativity: f32, capabilities: Vec<Capability>, reasoning_level: ReasoningLevel) -> Self {
         // Create an agent pipeline
-        let mut pipeline = core.new_agent_pipeline(environment, creativity, capabilities.clone(), environment.get_allowed_functions_with_system_functions(&capabilities));
+        let mut pipeline = core.new_agent_pipeline(environment, creativity, reasoning_level, capabilities.clone(), environment.get_allowed_functions_with_system_functions(&capabilities));
 
         // Get a checkpoint of the pipeline's chat so that we can reset it after each run.
         let checkpoint = pipeline.chat_mut().create_checkpoint();
@@ -491,38 +496,52 @@ impl<'a, E: Environment> Agent<'a, E> {
             };
 
             // Run the pipeline with the inputs
-            let mut outputs = self.pipeline.run(&inputs);
+            let outputs = self.pipeline.run(&inputs);
 
 
             // Get the chat from the pipeline to feed errors and tool results back into the agent
             let chat = self.pipeline.chat_mut();
 
-            // If log file is provided, append last chat message to the log file
+            // If log file is provided, append last two chat messages to the log file
             if let Some(log_file) = log_file {
-                let last_message = chat.messages().last().expect("No messages in chat, did the pipeline run fail somehow?");
+                let last_two_messages = chat.messages().iter().rev().take(2).collect::<Vec<_>>();
+                if last_two_messages.is_empty() {
+                    panic!("No messages in chat, did the pipeline run fail somehow?");
+                }
 
-                let message_string = format!(
-                    "# **Message from {}**\n{}\n\n---\n\n",
-                    last_message.role.to_chatml_role(),
-                    &last_message.content
-                );
+                let message_string = last_two_messages.iter().rev().map(|message| {
+                    format!(
+                        "# **{}**\n{}\n\n---\n\n",
+                        message.role.to_chatml_role(),
+                        &message.content
+                    )
+                }).collect::<String>();
 
-                if let Err(e) = std::fs::OpenOptions::new().append(true).create(true).open(log_file).and_then(|mut file| std::io::Write::write_all(&mut file, message_string.as_bytes())) {
+                if let Err(e) = std::fs::OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(log_file)
+                    .and_then(|mut file| std::io::Write::write_all(&mut file, message_string.as_bytes()))
+                {
                     wlog!("Failed to write to log file '{}': {}", log_file.display(), e);
                 }
             }
             
-            // Validate the output function call
+            // Get the function name from the outputs
             let function_name = outputs
                 .get("function_name")
                 .unwrap()
                 .as_str()
-                .unwrap()
+                .expect("Function name was not a string")
                 .to_string();
 
-            // Remove the function name from the outputs so that it contains only the arguments for the function call
-            outputs.remove("function_name");
-            let arguments = outputs;
+            // Get the arguments for the function call from the outputs
+            let arguments = outputs
+                .get("arguments")
+                .unwrap()
+                .as_object()
+                .cloned()
+                .expect("Function call arguments was not an object");
 
             // Log the function name
             let arg_list = arguments
@@ -530,11 +549,11 @@ impl<'a, E: Environment> Agent<'a, E> {
                 .map(|(k, v)| format!("{}: {}", k, serde_json::to_string(v).unwrap()))
                 .collect::<Vec<String>>()
                 .join(", ");
-            dlog!("Agent tried calling function: {}({})", function_name, arg_list);
+            dlog!("\nAgent tried calling function: {}({})", function_name, arg_list);
 
             // If the function is "end_task", return
             if function_name == "end_task" {
-                break serde_json::Value::Object(arguments);
+                break Value::Object(arguments);
             }
 
             // Execute the function in the environment
@@ -548,7 +567,7 @@ impl<'a, E: Environment> Agent<'a, E> {
             match function_result {
                 Ok(result) => {
                     // Feed the result back into the agent
-                    let (result_json, successful) = match result {
+                    let (result_json, _successful) = match result {
                         FunctionResult::Ok(map) => (serde_json::Value::Object(map), true),
                         FunctionResult::Err(message) => (serde_json::json!({
                             "error": message,
@@ -586,12 +605,17 @@ impl<'a, E: Environment> Agent<'a, E> {
                 let last_message = chat.messages().last().expect("No messages in chat, did something go wrong?");
 
                 let message_string = format!(
-                    "# **Message from {}**\n{}\n\n---\n\n",
+                    "# **{}**\n{}\n\n---\n\n",
                     last_message.role.to_chatml_role(),
                     &last_message.content
                 );
 
-                if let Err(e) = std::fs::OpenOptions::new().append(true).create(true).open(log_file).and_then(|mut file| std::io::Write::write_all(&mut file, message_string.as_bytes())) {
+                if let Err(e) = std::fs::OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(log_file)
+                    .and_then(|mut file| std::io::Write::write_all(&mut file, message_string.as_bytes()))
+                {
                     wlog!("Failed to write to log file '{}': {}", log_file.display(), e);
                 }
             }

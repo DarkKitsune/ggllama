@@ -340,6 +340,7 @@ impl DirectoryEnvironment {
         }
     }
 
+    /*
     /// Runs NPM commands in the directory wrapped by this environment and returns the output.
     pub fn run_npm_command(&self, args: &[&str]) -> Result<String> {
         // If the first argument is one that requires a package.json file, ensure it exists.
@@ -379,7 +380,7 @@ impl DirectoryEnvironment {
                 String::from_utf8_lossy(&output.stderr)
             ))
         }
-    }
+    }*/
 }
 
 impl Environment for DirectoryEnvironment {
@@ -411,13 +412,22 @@ impl Environment for DirectoryEnvironment {
             // Function to get files in a given relative path within the environment directory.
             Function::new(
                 "list_dir",
-                "Gets all files and subdirectories in the environment directory and all of its subdirectories, recursively, \
-                 as a list of relative paths. If there are no files, an empty list is returned.",
+                "Gets all files and subdirectories in `relative_path` within the environment directory, recursively.",
+                vec![FunctionParameter::new(
+                    "relative_path",
+                    ParameterType::String,
+                    "The relative path to a subdirectory within the environment directory, whose contents you want to list. Use `.` \
+                    for the root of the environment directory.",
+                )],
                 vec![],
-                vec![],
-                |env: &mut DirectoryEnvironment, _args: &JsonMap| {
+                |env: &mut DirectoryEnvironment, args: &JsonMap| {
+                    let relative_path = args
+                        .get("relative_path")
+                        .ok_or(anyhow::anyhow!("Missing argument: relative_path"))?
+                        .as_str()
+                        .ok_or(anyhow::anyhow!("Argument 'relative_path' is not a string"))?;
                     Ok(map! {
-                        "files" => env.get_all_files_and_directories(".")
+                        "files" => env.get_all_files_and_directories(relative_path)
                     })
                 },
             ),
@@ -566,7 +576,7 @@ impl Environment for DirectoryEnvironment {
                         }),
                     }
                 },
-            ),
+            ),/*
             // Function to run an NPM command in the environment directory.
             Function::new(
                 "npm_run",
@@ -602,7 +612,7 @@ impl Environment for DirectoryEnvironment {
                         }),
                     }
                 },
-            ),
+            ),*/
         ]
     }
 }

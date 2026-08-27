@@ -1,5 +1,6 @@
 use std::{fmt::Display, io::{self, Write}, time::SystemTime};
 
+use anyhow::Result;
 use llama_cpp_4::{
     context::LlamaContext, llama_batch::LlamaBatch, model::{AddBos, LlamaChatMessage, LlamaModel, Special}, sampling::LlamaSampler, token::LlamaToken,
 };
@@ -10,11 +11,11 @@ use crate::{
 };
 
 const BATCH_CAPACITY: usize = 4096;
-const CREATIVITY_NUDGE_DOWN_EVERY_N: usize = 16384; // Every N tokens, we nudge the creativity down towards 0.0 for stability over long contexts.
+const CREATIVITY_NUDGE_DOWN_EVERY_N: usize = 32768; // Every N tokens, we nudge the creativity down towards 0.0 for stability over long contexts.
 /// Higher = creativity adapts downwards slower.
-const CREATIVITY_DOWN_DIVISOR: f32 = 7.0;
+const CREATIVITY_DOWN_DIVISOR: f32 = 9.0;
 /// Higher = creativity adapts upwards slower.
-const CREATIVITY_UP_DIVISOR: f32 = 4.0;
+const CREATIVITY_UP_DIVISOR: f32 = 5.0;
 /// When restoring a checkpoint, creativity is temporarily raised then reduced again after this many tokens.
 /// This is to encourage creativity and avoid the model getting stuck in a loop of repeating the same output after restoring a checkpoint.
 const CHECKPOINT_RESTORE_CREATIVITY_GRACE: usize = 24;
@@ -44,7 +45,7 @@ impl Suffix {
     /// Checks if the suffix should be applied based on the given text.
     pub fn should_apply(&self, text: &str) -> bool {
         // Return false early if the text already contains the suffix text, to avoid inducing repetition in the model output.
-        if text.contains(&self.text) {
+        if text.contains(self.text.trim()) {
             return false;
         }
         // Check if the suffix should be applied based on the presence or absence of trigger texts.
@@ -93,9 +94,10 @@ fn new_sampler_standard(temperature: f32, seed: u32) -> LlamaSampler {
 
     // Create sampler chain which only samples tokens that aren't very unlikely
     LlamaSampler::chain_simple([
-        LlamaSampler::top_n_sigma(1.0),
+        LlamaSampler::top_n_sigma(0.8),
+        LlamaSampler::top_k(25),
         LlamaSampler::temp(temperature),
-        LlamaSampler::dist(seed)
+        LlamaSampler::dist(seed),
     ])
 }
 
@@ -158,9 +160,6 @@ pub struct Inference<'a> {
     queued_text: String,
     /// Flag indicating whether to use Gemma 4 style channels for reasoning.
     use_gemma_channels: bool,
-    /// Flag indicating whether to use the small model for this inference job.
-    /// This is useful for tasks that don't require much intelligence, such as summarization or choosing between options.
-    use_small_model: bool,
 }
 
 impl ChatRole {
@@ -187,7 +186,6 @@ impl<'a> Inference<'a> {
         tokens: Vec<LlamaToken>,
         creativity: f32,
         seed: Option<u32>,
-        use_small_model: bool,
     ) -> Self {
         // If seed is not provided, use the current time as a seed
         let seed = seed.unwrap_or_else(|| {
@@ -217,7 +215,6 @@ impl<'a> Inference<'a> {
             queued_text: String::new(),
             tokens_since_last_creativity_nudge: 0,
             use_gemma_channels: core.use_gemma_format,
-            use_small_model,
         }
     }
 
@@ -228,11 +225,7 @@ impl<'a> Inference<'a> {
 
     /// Get a reference to the model.
     pub(crate) fn model(&self) -> &LlamaModel {
-        if self.use_small_model && let Some(small_model) = self.core.small_model() {
-            small_model
-        } else {
-            self.core.model()
-        }
+        self.core.model()
     }
 
     /// Get the number of tokens in the context so far.
@@ -482,6 +475,9 @@ impl<'a> Inference<'a> {
         for _ in 0..char_count {
             self.response_text.pop();
         }
+
+        // Print a "<POP n>" tag to the console, informing the user to disregard the last n tokens
+        print!("<POP {}>", token_count);
     }
 
     /// Queue messages to be added to the context, then begin the assistant response to said messages.
@@ -764,6 +760,117 @@ impl<'a> Inference<'a> {
         (self.outputs.get_mut(&name).unwrap(), encountered_stop_sequence)
     }
 
+    /// Infer a JSON object from the current context.
+    /// Returns a serde_json::Value representing the inferred JSON object.
+    /// Stops inferring once the JSON object is fully inferred (the closing brace is reached).
+    pub(crate) fn infer_json(&mut self) -> Result<Value> {
+        // Push the opening brace for the JSON object into the context and start building the result string.
+        let mut result = String::from("{");
+        self.push_text("{");
+
+        // Infer the JSON object up to each closing brace until the correct closing brace is reached.
+        // Also, ignore any opening or closing braces that are part of strings within the JSON object.
+        // Also respect escaped quotes within strings (unless the backslash itself is escaped)
+        let mut brace_count = 1;
+        let mut in_string = false;
+        while brace_count > 0 {
+            // Infer the next chunk of the JSON object, stopping at the next closing brace.
+            // Also stop if a tool call ends, to avoid including it in the JSON object.
+            let chunk = self.infer(None, &["}", "</tool_call>"]);
+
+            // Extract the stop sequence and the content from the inferred chunk.
+            let stop_sequence = chunk.encountered_stop_sequence;
+            let chunk = chunk.content;
+
+            // Append the inferred chunk to the result string.
+            result.push_str(&chunk);
+
+            // Update the brace count based on the inferred chunk.
+            for (i, c) in chunk.chars().enumerate() {
+                if c == '"' && (i == 0 || chunk.chars().nth(i - 1) != Some('\\') || (i > 1 && chunk.chars().nth(i - 2) == Some('\\'))) {
+                    in_string = !in_string;
+                }
+                if !in_string {
+                    if c == '}' {
+                        brace_count -= 1;
+                        // Debug print
+                        print!("<BRACE_COUNT: {}>", brace_count);
+                    }
+                    if c == '{' {
+                        brace_count += 1;
+                        // Debug print
+                        print!("<BRACE_COUNT: {}>", brace_count);
+                    }
+                }
+            }
+
+            // If the stop sequence was "</tool_call>", look at brace_count.
+            // If brace_count is 1, we can just pop it off the context and then push a closing brace to properly close the JSON object, then break the loop.
+            // If it is not 1, then we should instead return an error.
+            if stop_sequence == Some("</tool_call>".to_string()) {
+                if brace_count == 1 {
+                    // Pop off the tool call tag from both the context and the result string.
+                    let token_count = self.model().str_token_count("</tool_call>", AddBos::Never).unwrap();
+                    let char_count = "</tool_call>".chars().count();
+                    self.pop_from_end(token_count, char_count);
+                    result.truncate(result.len() - char_count);
+
+                    // Push a closing brace to properly close the JSON object.
+                    self.push_text("}");
+                    result.push('}');
+
+                    // Break the loop since we've handled the closing of the JSON object.
+                    break;
+                } else {
+                    return Err(anyhow::anyhow!("Encountered unexpected </tool_call> tag while parsing JSON object"));
+                }
+            }
+        }
+
+        // We need to traverse the result string again and for each newline inside a string we need to ensure it is properly escaped for valid JSON.
+        // Also de-escape any newnlines that are not within a string.
+        let mut escaped_result = String::new();
+        let mut in_string = false;
+        let mut skip_next = false;
+        for (i, c) in result.chars().enumerate() {
+            // Skip the next character if flagged, used for de-escaping newlines outside of strings.
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            
+            // Check if the current character is a quote and not escaped, to toggle the in_string flag.
+            if c == '"' && (i == 0 || result.chars().nth(i - 1) != Some('\\') || (i > 1 && result.chars().nth(i - 2) == Some('\\'))) {
+                in_string = !in_string;
+            }
+
+            // Handle newlines: escape if inside a string, de-escape if outside.
+            if in_string && c == '\n' {
+                escaped_result.push_str("\\n");
+            } else if !in_string && c == '\\' && result.chars().nth(i + 1) == Some('n') {
+                // De-escape newlines that are not within a string
+                escaped_result.push('\n');
+                // Skip the next character ('n')
+                skip_next = true;
+                continue;
+            } else {
+                escaped_result.push(c);
+            }
+        }
+        result = escaped_result;
+
+        // Attempt to parse the inferred JSON object
+        let parsed: Value = serde_json::from_str(result.as_str()).map_err(|err| anyhow::anyhow!("Failed to parse JSON object: {}", err))?;
+
+        Ok(parsed)
+    }
+
+
+    /// Set an output value. Especially useful within a `Pipeline`.
+    pub(crate) fn set_output(&mut self, name: impl Display, value: Value) {
+        self.outputs.insert(name.to_string(), value);
+    }
+
     /// Generate a reasoning trace in the context, and return the string.
     pub(crate) fn think(&mut self, suffix: Option<&Suffix>) -> String {
         // Start the <think> block
@@ -793,11 +900,13 @@ impl<'a> Inference<'a> {
         // Insert suffix if provided (and if it applies) and then infer after it
         if let Some(suffix) = suffix && suffix.should_apply(&result) {
             // Get the text of the suffix.
-            // If the original reasoning trace was empty then trim the beginning of the suffix to avoid unnecessary leading whitespace.
-            let suffix_text = if result.is_empty() {
-                suffix.text.trim_start()
+            let suffix_text = suffix.text.trim().to_string();
+
+            // If the original reasoning trace was not empty then add an extra newline before the suffix.
+            let suffix_text = if !result.is_empty() {
+                format!("\n{}", suffix_text)
             } else {
-                &suffix.text
+                suffix_text
             };
 
             // First roll back the context to remove the closing tag token(s)
@@ -806,8 +915,8 @@ impl<'a> Inference<'a> {
             self.pop_from_end(tokens_to_roll_back, chars_to_roll_back);
 
             // Then, push the suffix into the context and result string.
-            self.push_text(suffix_text);
-            result.push_str(suffix_text);
+            self.push_text(&suffix_text);
+            result.push_str(&suffix_text);
 
             // Then, infer til the closing tag or the beginning of a tool call.
             let after_suffix = self.infer(None, &[closing_tag, "<tool_call>"]);
