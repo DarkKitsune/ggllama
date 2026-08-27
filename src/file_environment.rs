@@ -416,8 +416,6 @@ impl Environment for DirectoryEnvironment {
                 vec![FunctionParameter::new(
                     "relative_path",
                     ParameterType::String,
-                    "The relative path to a subdirectory within the environment directory, whose contents you want to list. Use `.` \
-                    for the root of the environment directory.",
                 )],
                 vec![],
                 |env: &mut DirectoryEnvironment, args: &JsonMap| {
@@ -438,7 +436,6 @@ impl Environment for DirectoryEnvironment {
                 vec![FunctionParameter::new(
                     "relative_path",
                     ParameterType::String,
-                    "The relative path to the file within the environment directory.",
                 )],
                 vec![],
                 |env: &mut DirectoryEnvironment, args: &JsonMap| {
@@ -457,8 +454,8 @@ impl Environment for DirectoryEnvironment {
                 "write_file",
                 "Writes contents to a file in the environment directory. This will overwrite the file if it already exists.",
                 vec![
-                    FunctionParameter::new("relative_path", ParameterType::String, "The relative path to the file within the environment directory."),
-                    FunctionParameter::new("file_contents", ParameterType::Any, "The contents to write to the file."),
+                    FunctionParameter::new("relative_path", ParameterType::String),
+                    FunctionParameter::new("file_contents", ParameterType::Any),
                 ],
                 vec![
                     Capability::FileWrite,
@@ -488,9 +485,9 @@ impl Environment for DirectoryEnvironment {
                 "edit_file",
                 "Replaces the first occurrence of `target` with `replacement` in a file.",
                 vec![
-                    FunctionParameter::new("relative_path", ParameterType::String, "The relative path to the file within the environment directory."),
-                    FunctionParameter::new("target", ParameterType::String, "The substring to be replaced in the file."),
-                    FunctionParameter::new("replacement", ParameterType::String, "The new substring to replace the target with."),
+                    FunctionParameter::new("relative_path", ParameterType::String),
+                    FunctionParameter::new("target", ParameterType::String),
+                    FunctionParameter::new("replacement", ParameterType::String),
                 ],
                 vec![
                     Capability::FileWrite,

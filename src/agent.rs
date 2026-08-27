@@ -76,17 +76,14 @@ pub struct FunctionParameter {
     pub name: String,
     /// The type of the parameter, which can be used to inform the agent about how to call it.
     pub param_type: ParameterType,
-    /// A description of the parameter, which can be used to inform the agent about its purpose.
-    pub description: String,
 }
 
 impl FunctionParameter {
     /// Creates a new function parameter with the given name, type, and description.
-    pub fn new(name: impl Display, param_type: ParameterType, description: impl Display) -> Self {
+    pub fn new(name: impl Display, param_type: ParameterType) -> Self {
         Self {
             name: name.to_string(),
             param_type,
-            description: description.to_string(),
         }
     }
 }
@@ -210,11 +207,7 @@ impl<E: Environment> Function<E> {
         let params: Vec<_> = self
             .parameters
             .iter()
-            .map(|p| serde_json::json!({
-                "name": p.name,
-                "description": p.description,
-                "type": p.param_type.to_string(),
-            }))
+            .map(|p| p.name.clone())
             .collect();
 
         serde_json::json!({
@@ -229,7 +222,7 @@ impl<E: Environment> Function<E> {
         let params: Vec<String> = self
             .parameters
             .iter()
-            .map(|p| format!("<parameter={}>\n{} ({})\n</parameter>", p.name, p.description, p.param_type))
+            .map(|p| format!("<parameter={}>type={}</parameter>", p.name, p.param_type))
             .collect();
 
         //let description_string = format!("\n<description>\n{}\n</description>\n", self.description);
@@ -345,7 +338,6 @@ pub trait Environment: Sized {
             vec![FunctionParameter {
                 name: "result".to_string(),
                 param_type: ParameterType::String,
-                description: "The result or summary of the task, so the user is aware of what exactly was changed/accomplished.".to_string(),
             }],
             vec![],
             |_env: &mut Self, _args: &Map<String, serde_json::Value>| Ok(Map::new()),

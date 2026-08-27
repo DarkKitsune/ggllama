@@ -88,14 +88,14 @@ fn new_sampler_adaptive(creativity: f32, seed: u32) -> LlamaSampler {
 }*/
 
 /// Helper function to create a new standard sampler.
-fn new_sampler_standard(temperature: f32, seed: u32) -> LlamaSampler {
-    // Clamp temperature to the range [0.0, 2.0]
-    let temperature = temperature.clamp(0.0, 2.0);
+fn new_sampler_standard(creativity: f32, seed: u32) -> LlamaSampler {
+    // Clamp creativity to the range [0.0, 2.0]
+    let temperature = creativity.clamp(0.0, 2.0);
 
     // Create sampler chain which only samples tokens that aren't very unlikely
     LlamaSampler::chain_simple([
-        LlamaSampler::top_n_sigma(0.8),
-        LlamaSampler::top_k(25),
+        LlamaSampler::top_n_sigma(0.6 + creativity * 0.4), // 0.6 at creativity 0.0, 1.0 at creativity 1.0
+        LlamaSampler::top_k(20),
         LlamaSampler::temp(temperature),
         LlamaSampler::dist(seed),
     ])
@@ -793,13 +793,9 @@ impl<'a> Inference<'a> {
                 if !in_string {
                     if c == '}' {
                         brace_count -= 1;
-                        // Debug print
-                        print!("<BRACE_COUNT: {}>", brace_count);
                     }
                     if c == '{' {
                         brace_count += 1;
-                        // Debug print
-                        print!("<BRACE_COUNT: {}>", brace_count);
                     }
                 }
             }

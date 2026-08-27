@@ -188,7 +188,7 @@ impl Core {
         // Create a summarization pipeline
         Pipeline::new(
             self,
-            0.4,
+            0.5,
             false,
             summarization_system,
             summarization_input,
@@ -247,7 +247,7 @@ impl Core {
         // Create a JSON builder pipeline
         Pipeline::new(
             self,
-            0.5,
+            0.75,
             false,
             json_builder_system,
             json_builder_input,
@@ -690,9 +690,10 @@ Be creative, let every character have a chance to shine, and keep the story inte
                 prompt = prompt.with_section(TextSection::new(
                     None,
                     "You have the ability to write code within this environment.\n\
-                    Thoroughly comment any code you write, ensuring that less experienced programmers can read it.\n\
-                    If making a game or interface, or even a game level, make sure that everything is well-spaced and visually appealing, \
-                    using the available window/screen space, with a natural flow.\n\
+                    All code **must** be well-structured, scalable and follow best practices, yet smaller in size and efficient.\n\
+                    Write comments only at the beginning of your code blocks or function definitions, and make sure they are written concisely with few words.\n\
+                    If making a game or interface, or any other type of design, make sure that everything is well-spaced and visually appealing, \
+                    using all of the available space, with all elements following a natural and logical flow or theme.\n\
                     Feel free to use **appealing colors, styling, vector graphics, rounded corners, and other modern visual elements** where applicable, to make the product stand out!",
                 ));
             }
@@ -710,6 +711,7 @@ You may call any of the functions below within <tools></tools> XML tags:
 {}
 ```
 </tools>
+Any newlines in string values should be properly escaped, and all string values should be enclosed in double quotes. Example: {{\"key\": \"value\\nwith newline and \\\"quotes\\\"\"}}
 Do not include any additional text outside of the <tool_call> tags.
 
 Example response with a tool call:
@@ -733,8 +735,13 @@ Example response with a tool call:
                     formatter
                     // Task section
                     .with_section(TextSection::new(
-                        None,
+                        Some("Your Task".to_string()),
                         task.as_str().unwrap(),
+                    ))
+                    .with_section(TextSection::new(
+                        None,
+                        "Briefly think step-by-step about how to accomplish the task using the available functions/tools, \
+                            and then put your plan into action.",
                     ))
                 )
             }
