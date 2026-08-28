@@ -1,4 +1,4 @@
-use std::{fmt::Display, num::NonZeroU32, path::Path};
+use std::{collections::HashMap, fmt::Display, num::NonZeroU32, path::Path};
 
 use llama_cpp_4::{
     context::{LlamaContext, params::{LlamaContextParams, LlamaFlashAttnType}}, llama_backend::LlamaBackend, model::{LlamaModel, params::LlamaModelParams}, quantize::GgmlType,
@@ -182,7 +182,7 @@ impl Core {
         /// Defines the structure of the output.
         fn summarization_output(inference: &mut Inference, _inputs: &JsonMap, _reasoning: Option<String>) {
             inference.push_text("Here is the summarized text:\n```\n");
-            inference.infer_output("output", &["```"], false);
+            inference.infer_output("output", None, &["```"], false);
         }
 
         // Create a summarization pipeline
@@ -241,7 +241,7 @@ impl Core {
         /// Defines the structure of the output.
         fn json_builder_output(inference: &mut Inference, _inputs: &JsonMap, _reasoning: Option<String>) {
             inference.push_text("## JSON Output\n```json\n");
-            inference.infer_output("output", &["```"], true);
+            inference.infer_output("output", None, &["```"], true);
         }
 
         // Create a JSON builder pipeline
@@ -322,7 +322,7 @@ impl Core {
                 inference.restore_checkpoint(checkpoint.clone());
 
                 // Output the grade letter from the model.
-                output = inference.infer_output("output", &["\"}", "}"], false).0;
+                output = inference.infer_output("output", None, &["\"}", "}"], false).0;
 
                 // Look up the index of the answer letter in IDX_TO_LETTER using the first character of output
                 let answer_letter = output.as_str().unwrap().chars().next().unwrap_or(' ');
@@ -444,7 +444,7 @@ Be creative, let every character have a chance to shine, and keep the story inte
             loop {
                 // Infer the turn type
                 let turn_type = inference
-                    .infer_output("turn_type", &["\""], false)
+                    .infer_output("turn_type", None, &["\""], false)
                     .0
                     .as_str()
                     .unwrap()
@@ -464,7 +464,7 @@ Be creative, let every character have a chance to shine, and keep the story inte
 
                     // Infer the character name
                     let character_name = inference
-                        .infer_output("character_name", &["\""], false)
+                        .infer_output("character_name", None, &["\""], false)
                         .0
                         .as_str()
                         .unwrap()
@@ -494,7 +494,7 @@ Be creative, let every character have a chance to shine, and keep the story inte
                 }
 
                 // Infer the content
-                let content = inference.infer_output("content", &["\""], false).0;
+                let content = inference.infer_output("content", None, &["\""], false).0;
 
                 // If this is a dialogue turn, insert the name back into the beginning of the output.
                 if turn_type == "dialogue" {
@@ -598,7 +598,7 @@ Be creative, let every character have a chance to shine, and keep the story inte
             loop {
                 // Infer the turn type
                 let turn_type = inference
-                    .infer_output("turn_type", &["\""], false)
+                    .infer_output("turn_type", None, &["\""], false)
                     .0
                     .as_str()
                     .unwrap()
@@ -620,7 +620,7 @@ Be creative, let every character have a chance to shine, and keep the story inte
                 }
 
                 // Infer the content
-                let content = inference.infer_output("content", &["\""], false).0;
+                let content = inference.infer_output("content", None, &["\""], false).0;
 
                 // If this is a dialogue turn, insert the name back into the beginning of the output.
                 if turn_type == "dialogue" {
@@ -663,6 +663,11 @@ Be creative, let every character have a chance to shine, and keep the story inte
         let functions = functions.into();
         let language_capabilities = language_capabilities.into();
 
+        let function_param_names: HashMap<String, Vec<String>> = functions
+            .iter()
+            .map(|f| (f.name.clone(), f.parameters.iter().map(|p| p.name.clone()).collect::<Vec<_>>()))
+            .collect();
+
         let function_jsons = functions
             .iter()
             .map(|f| serde_json::to_string_pretty(&f.to_json()).unwrap())
@@ -690,8 +695,9 @@ Be creative, let every character have a chance to shine, and keep the story inte
                 prompt = prompt.with_section(TextSection::new(
                     None,
                     "You have the ability to write code within this environment.\n\
-                    All code **must** be well-structured, scalable and follow best practices, yet smaller in size and efficient.\n\
-                    Write comments only at the beginning of your code blocks or function definitions, and make sure they are written concisely with few words.\n\
+                    All code must be well-structured, scalable and follow best practices, yet small in size and efficient. **Always** smaller implementations.\n\
+                    **Correctness is paramount**; your code should function as intended without errors. If you make mistakes, correct them promptly.\n\
+                    Write comments only at the beginning of your code blocks or function definitions, and make sure they are written concisely with few words. Prefer brevity and clarity.\n\
                     If making a game or interface, or any other type of design, make sure that everything is well-spaced and visually appealing, \
                     using all of the available space, with all elements following a natural and logical flow or theme.\n\
                     Feel free to use **appealing colors, styling, vector graphics, rounded corners, and other modern visual elements** where applicable, to make the product stand out!",
@@ -704,22 +710,33 @@ Be creative, let every character have a chance to shine, and keep the story inte
                     None,
                     format!(
 "You may use 1 tool call to call 1 function per turn to assist you.
-You should use JSON format for all tool calls, between <tool_call> and </tool_call> XML tags.
+You should use XML format for all tool calls, between <tool_call> and </tool_call> XML tags.
 You may call any of the functions below within <tools></tools> XML tags:
 <tools>
 ```
 {}
 ```
 </tools>
-Any newlines in string values should be properly escaped, and all string values should be enclosed in double quotes. Example: {{\"key\": \"value\\nwith newline and \\\"quotes\\\"\"}}
 Do not include any additional text outside of the <tool_call> tags.
+When generating tool calls, you should use the <function=function_name></function> XML tags (on their own lines) to specify the function being called.
+Between these tags you should use <argument name=argument_name></argument> XML tags (on their own lines) to specify the arguments for the function being called.
 
 Example response with a tool call:
 <tool_call>
+<function=example_function>
+<argument=example_param1>
+[1, 2, 3]
+</argument>
+<argument=example_param2>
 {{
-    \"name\": \"example_function\",
-    \"arguments\": {{\"param1\": \"value1\"}}
+    \"user_name\": \"Bob\",
+    \"user_info\": {{
+        \"age\": 27,
+        \"location\": \"New York\"
+    }}
 }}
+</argument>
+</function>
 </tool_call>
 ",
                         function_jsons
@@ -739,9 +756,8 @@ Example response with a tool call:
                         task.as_str().unwrap(),
                     ))
                     .with_section(TextSection::new(
-                        None,
-                        "Briefly think step-by-step about how to accomplish the task using the available functions/tools, \
-                            and then put your plan into action.",
+                        Some("When You Complete the Task".to_string()),
+                        "Once you complete the task outlined above, provide a summary of your actions and results using `end_task`.",
                     ))
                 )
             }
@@ -752,53 +768,42 @@ Example response with a tool call:
         }
 
         /// Defines the structure of the output.
-        fn agent_output(inference: &mut Inference, _inputs: &JsonMap, _reasoning: Option<String>) {
+        fn agent_output(inference: &mut Inference, _inputs: &JsonMap, _reasoning: Option<String>, function_param_names: HashMap<String, Vec<String>>) {
             // Begin by pushing the opening tool call tag
             inference.push_text("<tool_call>\n");
 
-            // Set a checkpoint in case the tool call cannot parse
-            let checkpoint = inference.create_checkpoint();
+            // Open the function tag and prepare to infer the function name
+            inference.push_text("<function=");
 
-            // Loop until a valid JSON object representing the tool call is inferred.
-            let tool_call = loop {
-                // Infer a JSON object representing the tool call
-                let tool_call_json_result = inference.infer_json();
+            // Infer the function name
+            let (function_name, _stop_sequence) = inference.infer_output("function_name", None, &[">"], false);
+            // Get the name as a string without any potential surrounding quotes.
+            let function_name = function_name.as_str().unwrap().trim_matches('"').to_string();
 
-                // If the JSON object could not be parsed, restore the checkpoint and continue the loop
-                if tool_call_json_result.is_err() {
-                    inference.restore_checkpoint(checkpoint.clone());
-                    
-                    // Debug tag showing the user that we had to redo the tool call
-                    print!("\n<REDO_TOOL>\n");
+            // Close the function tag
+            inference.push_text(">\n");
 
-                    continue;
+            // Loop over the params (if the function exists) and infer their argument values
+            if let Some(param_names) = function_param_names.get(&function_name) {
+                for param_name in param_names {
+                    // Push the opening argument tag for this parameter
+                    inference.push_text(&format!("<argument={}>\n", param_name));
+
+                    // Infer the value for this argument
+                    inference.infer_output("arguments", Some(param_name), &["</argument>", "</parameter>"], true);
+
+                    // Push a newline after the argument tag
+                    inference.push_text("\n");
                 }
+            }
 
-                // Successfully parsed the JSON object, break the loop with the parsed value.
-                break tool_call_json_result.unwrap();
-            };
+            // Push the closing function tag
+            inference.push_text("</function>\n");
 
-            // Close the tool call tag after a newline
-            inference.push_text("\n</tool_call>\n");
-            
-            // Extract the function name from the tool call JSON object under "name", falling back on "function_name" and "function" if "name" wasn't found.
-            let function_name = tool_call.get("name")
-                .or_else(|| tool_call.get("function_name"))
-                .or_else(|| tool_call.get("function"))
-                .and_then(|v| v.as_str())
-                .expect("Function name not found in tool call JSON object");
+            // Push the closing tool call tag
+            inference.push_text("</tool_call>\n");
 
-            // Set the function name as an output for the agent to use.
-            inference.set_output("function_name", function_name.into());
 
-            // Extract the arguments from the tool call JSON object under "arguments", falling back on "parameters" if "arguments" wasn't found.
-            let arguments = tool_call.get("arguments")
-                .or_else(|| tool_call.get("parameters"))
-                .cloned()
-                .expect("Arguments not found in tool call JSON object");
-
-            // Set the extracted arguments as an output for the agent to use.
-            inference.set_output("arguments", arguments);
         }
 
         // Get the environment prompt as a string to pass to the agent system function.
@@ -811,10 +816,107 @@ Example response with a tool call:
             true,
             move |formatter| agent_system(formatter, &environment_string, &function_jsons, &language_capabilities),
             agent_input,
-            agent_output,
+            move |inference, inputs, reasoning| agent_output(inference, inputs, reasoning, function_param_names.clone()),
             &[],
             Some(CONTEXT_SIZE),
             reasoning_level,
+            None,
+        )
+    }
+
+    /// Creates a new pipeline for enhancing a task prompt
+    /// The prompt to be enhanced should be provided under the "input" key in the input hashmap.
+    /// The enhanced prompt will be returned under the "output" key in the output hashmap.
+    /// `reasoning_level` and `capabilities` should match the values used for the agent.
+    pub fn new_task_prompt_enhancer<'a, E: Environment>(&'a self, reasoning_level: ReasoningLevel, environment: &E, capabilities: Vec<Capability>) -> Pipeline<'a> {
+        /// Defines the structure of the system prompt.
+        fn prompt_enhancement_system(formatter: PromptFormatter) -> PromptFormatter {
+            formatter
+                .with_section(TextSection::new(
+                    None,
+                    "You are an expert in enhancing prompts for AI agent systems."
+                ))
+        }
+
+        /// Defines the structure of the input.
+        fn prompt_enhancement_input(formatter: PromptFormatter, inputs: &JsonMap, reasoning_level: ReasoningLevel, environment_prompt: &str, capabilities: &[Capability]) -> Option<PromptFormatter> {
+            // Format capabilities into a list like "a, b, c, and d"
+            let capabilities_list = capabilities.iter().map(|c| c.to_string()).collect::<Vec<_>>();
+            let capabilities_list = match capabilities_list.len() {
+                0 => "basic reasoning".to_string(),
+                1 => format!("{} and basic reasoning", capabilities_list[0]),
+                2 => format!("{} and {}", capabilities_list[0], capabilities_list[1]),
+                _ => {
+                    let last = capabilities_list.last().unwrap();
+                    let rest = &capabilities_list[..capabilities_list.len() - 1];
+                    format!("{} and {}", rest.join(", "), last)
+                }
+            };
+
+            let reasoning_level_instruction = match reasoning_level {
+                ReasoningLevel::High =>
+                    "- Instruct the AI agent to plan and think through each step of the task, exploring all possibilities. **Correctness is key**.\n\
+                    - The final prompt should be clear, concise, and easy to understand, covering all aspects of the task at hand. \
+                    Prefer brevity without sacrificing clarity.\n",
+                ReasoningLevel::Medium => "- The final prompt should be clear, concise, and easy to understand, covering all aspects of the task at hand, \
+                    while remaining small in size. Prefer brevity without sacrificing clarity.\n",
+                ReasoningLevel::Low =>
+                    "- Instruct the AI agent to come to a conclusion efficiently and without overthinking. **There is a limited time budget**.\n\
+                    - The final prompt should be clear, concise, and easy to understand, covering all aspects of the task at hand, while remaining small in size. \
+                    Prefer brevity.\n",
+                ReasoningLevel::None =>
+                    "- The agent may not be very capable of its own planning and reasoning. \
+                    Therefore the final prompt should be long and detailed, clearly explaining all aspects of the task and expected results/outcome, \
+                    exploring multiple possibilities as well as any pitfalls.\n",
+            };
+
+            formatter.with_section(TextSection::new(
+                None,
+                format!(
+"Please enhance the following prompt:\n```\n{}\n```
+
+**What to Change/Enhance**:
+- Expand the prompt with additional context and details as needed, using your best judgment.
+- Outline the steps needed to accomplish the task based on the capabilities of the AI agent: {}.
+{}\
+- Format it clearly using markdown, and make sure it is easy to understand so that the AI agent can follow the instructions correctly.
+- Outline any important details. Do not leave out any critical information.
+
+Understand that **a complex task with too many steps may confuse the AI agent**, as will too many words and directives.
+
+**Agent Environment**:
+The agent will be working within an environment described as:
+```
+{}
+```
+",
+                    inputs["input"],
+                    capabilities_list,
+                    reasoning_level_instruction,
+                    environment_prompt,
+                ),
+            ))
+            .into()
+        }
+
+        /// Defines the structure of the output.
+        fn prompt_enhancement_output(inference: &mut Inference, _inputs: &JsonMap, _reasoning: Option<String>) {
+            inference.push_text("Here is the enhanced prompt:\n```\n");
+            inference.infer_output("output", None, &["```"], false);
+        }
+
+        // Create a prompt enhancement pipeline
+        let environment_prompt = environment.environment_prompt(&capabilities);
+        Pipeline::new(
+            self,
+            0.75,
+            false,
+            prompt_enhancement_system,
+            move |formatter, inputs| prompt_enhancement_input(formatter, inputs, reasoning_level, &environment_prompt, &capabilities),
+            prompt_enhancement_output,
+            &[],
+            Some(65536),
+            ReasoningLevel::None,
             None,
         )
     }

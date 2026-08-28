@@ -173,7 +173,7 @@ impl<'a> Chat<'a> {
             }
 
             // Infer the response until one of the stop sequences is encountered
-            let response = inference.infer(Some(max_tokens.unwrap_or(context_size_limit / 2)), &stop_sequences);
+            let response = inference.infer(Some(max_tokens.unwrap_or(context_size_limit / 2)), &stop_sequences, false);
             let content = response.content_without_stop_sequence().trim().to_string();
 
             ChatResponse {

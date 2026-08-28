@@ -37,8 +37,8 @@ impl Display for Capability {
             Capability::Python => write!(f, "working with Python code"),
             Capability::Rust => write!(f, "working with Rust code"),
             Capability::FileWrite => write!(f, "modifying files"),
-            Capability::FileExecute => write!(f, "executing files"),
-            Capability::JavaScript => write!(f, "working with JavaScript code and Node.js"),
+            Capability::FileExecute => write!(f, "executing code files"),
+            Capability::JavaScript => write!(f, "working with JavaScript code"),
             Capability::SpawnSubAgent(_) => write!(f, "spawning sub-agents with specific capabilities"),
             Capability::Other(s) => write!(f, "{}", s),
         }

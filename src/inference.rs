@@ -4,16 +4,16 @@ use anyhow::Result;
 use llama_cpp_4::{
     context::LlamaContext, llama_batch::LlamaBatch, model::{AddBos, LlamaChatMessage, LlamaModel, Special}, sampling::LlamaSampler, token::LlamaToken,
 };
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::{
     chat::{ChatMessage, ChatRole}, core::{Core}, util::JsonMap,
 };
 
 const BATCH_CAPACITY: usize = 4096;
-const CREATIVITY_NUDGE_DOWN_EVERY_N: usize = 32768; // Every N tokens, we nudge the creativity down towards 0.0 for stability over long contexts.
+const CREATIVITY_NUDGE_DOWN_EVERY_N: usize = 25000; // Every N tokens, we nudge the creativity down towards 0.0 for stability over long contexts.
 /// Higher = creativity adapts downwards slower.
-const CREATIVITY_DOWN_DIVISOR: f32 = 9.0;
+const CREATIVITY_DOWN_DIVISOR: f32 = 8.0;
 /// Higher = creativity adapts upwards slower.
 const CREATIVITY_UP_DIVISOR: f32 = 5.0;
 /// When restoring a checkpoint, creativity is temporarily raised then reduced again after this many tokens.
@@ -88,14 +88,28 @@ fn new_sampler_adaptive(creativity: f32, seed: u32) -> LlamaSampler {
 }*/
 
 /// Helper function to create a new standard sampler.
-fn new_sampler_standard(creativity: f32, seed: u32) -> LlamaSampler {
-    // Clamp creativity to the range [0.0, 2.0]
-    let temperature = creativity.clamp(0.0, 2.0);
+/// `is_reasoning` indicates whether the sampler is being used for reasoning tasks.
+fn new_sampler_standard(creativity: f32, seed: u32, is_reasoning: bool) -> LlamaSampler {
+    // If is_reasoning is true, we increase creativity to avoid loops and explore more reasoning paths
+    let creativity = if is_reasoning {
+        creativity + (1.0 - creativity) * 0.5
+    } else {
+        creativity
+    };
+    // Clamp creativity to the range [0.0, 1.0]
+    let creativity = creativity.clamp(0.0, 1.0);
+    // top-n-sigma = 0.5 at creativity 0.0, 1.6 at creativity 1.0
+    let top_n_sigma = 0.5 + creativity * 1.1;
+    // temperature = 0.5 at creativity 0.0, 1.5 at creativity 1.0
+    let temperature = 0.5 + creativity * 1.0;
+    // repeat-penalty = 1.0 at creativity 0.0, 1.12 at creativity 1.0
+    let repeat_penalty = 1.0 + creativity.powi(2) * 0.12;
 
     // Create sampler chain which only samples tokens that aren't very unlikely
     LlamaSampler::chain_simple([
-        LlamaSampler::top_n_sigma(0.6 + creativity * 0.4), // 0.6 at creativity 0.0, 1.0 at creativity 1.0
-        LlamaSampler::top_k(20),
+        LlamaSampler::penalties_simple(192, repeat_penalty),
+        LlamaSampler::top_n_sigma(top_n_sigma),
+        LlamaSampler::top_k(30),
         LlamaSampler::temp(temperature),
         LlamaSampler::dist(seed),
     ])
@@ -146,7 +160,6 @@ pub struct Inference<'a> {
     outputs: JsonMap,
     /// Supplied outputs that should be used instead of inferring.
     supplied_outputs: Option<JsonMap>,
-    sampler: LlamaSampler,
     /// Keep track of the seed so we can increment it and recreate the sampler when restoring checkpoint, to get new results.
     seed: u32,
     /// Keep track of the creativity value so we can nudge it towards 0.0 every so often for stability,
@@ -195,9 +208,6 @@ impl<'a> Inference<'a> {
                 .as_secs() as u32
         });
 
-        // Create a new sampler with the given creativity and seed
-        let sampler = new_sampler_standard(creativity, seed);
-
         // Create batch for decoding tokens into the context
         let batch = LlamaBatch::new(BATCH_CAPACITY, 1);
 
@@ -205,7 +215,6 @@ impl<'a> Inference<'a> {
             core,
             context,
             tokens,
-            sampler,
             seed,
             creativity,
             batch,
@@ -330,9 +339,8 @@ impl<'a> Inference<'a> {
         self.tokens_since_last_creativity_nudge =
             CREATIVITY_NUDGE_DOWN_EVERY_N - CHECKPOINT_RESTORE_CREATIVITY_GRACE;
 
-        // Create a new sampler with an incremented seed to ensure new results after restoring a checkpoint.
+        // Increment seed to ensure new results after restoring a checkpoint.
         self.seed = self.seed.wrapping_add(1);
-        self.sampler = new_sampler_standard(self.creativity, self.seed);
     }
 
     /// Reset the inference job, clearing the context and other internal states.
@@ -530,7 +538,8 @@ impl<'a> Inference<'a> {
     /// If this is an assistant message, then use `start_response_to_messages` to push the user and system messages first, then call this method.
     /// If `stop_sequences` is provided, generation will stop as soon as any of the sequences are generated.
     /// The encountered stop sequence will be included in the output, as well as remaining in the internal context.
-    pub fn infer(&mut self, max_tokens: Option<usize>, stop_sequences: &[&str]) -> InferenceResult {
+    /// `is_reasoning` indicates whether the inference is being performed in a reasoning context, which may adjust the sampling behavior.
+    pub fn infer(&mut self, max_tokens: Option<usize>, stop_sequences: &[&str], is_reasoning: bool) -> InferenceResult {
         // If we have queued text, push it to the context before generating.
         // Also measure this as prefill timing
         let prefill_start_time = std::time::Instant::now();
@@ -543,25 +552,35 @@ impl<'a> Inference<'a> {
         let prefill_token_count = self.tokens.len() - prefill_start_token_count;
         let prefill_tokens_per_second = prefill_token_count as f32 / prefill_duration.as_secs_f32();
 
+        // Create a new Sampler based on the current creativity, seed, and reasoning context
+        let mut sampler = new_sampler_standard(self.creativity, self.seed, is_reasoning);
+
         // Generate the next `n` tokens, then convert them to a string and return it.
         let mut output = String::new();
         let timing_start_time = std::time::Instant::now();
         let timing_start_token_count = self.tokens.len();
         let mut encountered_stop_sequence = None;
+        let mut last_seed = self.seed;
         for _ in 0..max_tokens.unwrap_or(usize::MAX) {
+            // If the seed has changed since the last iteration, create a new sampler with the updated seed.
+            if self.seed != last_seed {
+                sampler = new_sampler_standard(self.creativity, self.seed, is_reasoning);
+                last_seed = self.seed;
+            }
+
             // If we have sampled enough tokens since the last creativity nudge, nudge the creativity down towards 0.0.
             if self.tokens_since_last_creativity_nudge >= CREATIVITY_NUDGE_DOWN_EVERY_N {
                 self.creativity =
                     (self.creativity * (CREATIVITY_DOWN_DIVISOR - 1.0)) / CREATIVITY_DOWN_DIVISOR;
-                self.sampler = new_sampler_standard(self.creativity, self.seed);
+                sampler = new_sampler_standard(self.creativity, self.seed, is_reasoning);
                 self.tokens_since_last_creativity_nudge = 1;
             } else {
                 self.tokens_since_last_creativity_nudge += 1;
             }
 
             // Generate the next token
-            let token = self.sampler.sample(&self.context, -1);
-            self.sampler.accept(token);
+            let token = sampler.sample(&self.context, -1);
+            sampler.accept(token);
 
             // Exit early if the token is an end-of-sequence token
             if self.model().is_eog_token(token) {
@@ -665,10 +684,12 @@ impl<'a> Inference<'a> {
     /// If a value is found in the supplied outputs under the given name, it will be used instead of inferring.
     /// Returns a mutable reference to the value stored in the outputs map under the given name, allowing further manipulation.
     /// Also returns the stop sequence that was encountered, if any.
+    /// If `key_name` is provided, the output with `name` with be treated as a map and the inferred output value will be inserted under the given key.
     /// If `parse_json` is true, the inferred result will be parsed as JSON before being inserted into the outputs map.
     pub fn infer_output(
         &mut self,
         name: impl Display,
+        key_name: Option<&str>,
         stop_sequences: &[&str],
         parse_json: bool,
     ) -> (&mut Value, Option<String>) {
@@ -678,7 +699,16 @@ impl<'a> Inference<'a> {
         let mut encountered = None;
         if let Some(supplied_outputs) = &self.supplied_outputs {
             if let Some(value) = supplied_outputs.get(&name) {
-                encountered = Some(value.clone());
+                // If `key_name` is provided, set `encountered` to the value within the map under `value` with the given key
+                if let Some(key_name) = key_name {
+                    if let Value::Object(map) = value {
+                        if let Some(inner_value) = map.get(key_name) {
+                            encountered = Some(inner_value.clone());
+                        }
+                    }
+                } else {
+                    encountered = Some(value.clone());
+                }
             }
         }
 
@@ -687,29 +717,31 @@ impl<'a> Inference<'a> {
             // Push the supplied value into the context.
             self.push_text(&value);
 
-            // Insert the supplied value into the outputs map.
-            self.outputs.insert(name.clone(), value);
+            // If a key_name is provided, insert the value into the nested map under the given key, otherwise insert it directly into the outputs map.
+            if let Some(key_name) = key_name {
+                self.outputs.entry(name.clone()).or_insert_with(|| Value::Object(Map::new()));
+                if let Value::Object(map) = self.outputs.get_mut(&name).unwrap() {
+                    map.insert(key_name.to_string(), value);
+                }
+            } else {
+                self.outputs.insert(name.clone(), value);
+            }
 
             // Return a mutable reference to the value in the outputs map.
             return (self.outputs.get_mut(&name).unwrap(), stop_sequences.iter().next().map(|s| s.to_string()));
         }
 
         // If no supplied value is found, perform inference.
-        let result = self.infer(None, stop_sequences);
+        let result = self.infer(None, stop_sequences, false);
         let encountered_stop_sequence = result.encountered_stop_sequence.clone();
         let mut result = result.content_without_stop_sequence().trim().to_string();
 
-        // Parse the result as JSON if requested, otherwise insert as a string.
-        if parse_json {
+        // Parse the result as JSON if requested, otherwise use it as a string.
+        let value = if parse_json {
             let parsed = serde_json::from_str(&result);
             
             match parsed {
-                Ok(value) => {
-                    self.outputs.insert(
-                        name.clone(),
-                        value,
-                    );
-                }
+                Ok(value) => value,
                 Err(_) => {
                     // If the result starts with '"' but doesn't end with '"', then we probably have a malformed JSON string, so we insert the closing '"' and parse again
                     if result.starts_with('"') && !result.ends_with('"') {
@@ -717,15 +749,8 @@ impl<'a> Inference<'a> {
 
                         let parsed = serde_json::from_str(&result);
                         match parsed {
-                            Ok(value) => {
-                                self.outputs.insert(
-                                    name.clone(),
-                                    value,
-                                );
-                            }
-                            Err(_) => {
-                                self.outputs.insert(name.clone(), Value::String(result[..result.len() - 1].to_string()));
-                            }
+                            Ok(value) => value,
+                            Err(_) => Value::String(result[..result.len() - 1].to_string())
                         }
                     }
                     else {
@@ -735,35 +760,42 @@ impl<'a> Inference<'a> {
 
                             let parsed = serde_json::from_str(&result);
                             match parsed {
-                                Ok(value) => {
-                                    self.outputs.insert(
-                                        name.clone(),
-                                        value,
-                                    );
-                                }
-                                Err(_) => {
-                                    self.outputs.insert(name.clone(), Value::String(result[1..].to_string()));
-                                }
+                                Ok(value) => value,
+                                Err(_) => Value::String(result[1..].to_string()),
                             }
                         }
                         else {
-                            self.outputs.insert(name.clone(), Value::String(result));
+                            Value::String(result)
                         }
                     }
                 }
             }
         } else {
-            self.outputs.insert(name.clone(), Value::String(result));
-        }
+            Value::String(result)
+        };
 
-        // Return a mutable reference to the value in the outputs map.
-        (self.outputs.get_mut(&name).unwrap(), encountered_stop_sequence)
+        // If key_name is provided, insert the parsed value into the nested map in outputs under that key, otherwise insert it directly under the name.
+        if let Some(key_name) = key_name {
+            let nested_map = self.outputs.entry(name).or_insert_with(|| Value::Object(serde_json::Map::new()));
+            if let Value::Object(map) = nested_map {
+                map.insert(key_name.to_string(), value);
+                // Return a mutable reference to the value in the nested map.
+                (map.get_mut(key_name).unwrap(), encountered_stop_sequence)
+            }
+            else {
+                panic!("Expected nested map to be an object");
+            }
+        } else {
+            self.outputs.insert(name.clone(), value);
+            // Return a mutable reference to the value in the outputs map.
+            (self.outputs.get_mut(&name).unwrap(), encountered_stop_sequence)
+        }
     }
 
     /// Infer a JSON object from the current context.
     /// Returns a serde_json::Value representing the inferred JSON object.
     /// Stops inferring once the JSON object is fully inferred (the closing brace is reached).
-    pub(crate) fn infer_json(&mut self) -> Result<Value> {
+    pub fn infer_json(&mut self) -> Result<Value> {
         // Push the opening brace for the JSON object into the context and start building the result string.
         let mut result = String::from("{");
         self.push_text("{");
@@ -776,7 +808,7 @@ impl<'a> Inference<'a> {
         while brace_count > 0 {
             // Infer the next chunk of the JSON object, stopping at the next closing brace.
             // Also stop if a tool call ends, to avoid including it in the JSON object.
-            let chunk = self.infer(None, &["}", "</tool_call>"]);
+            let chunk = self.infer(None, &["}", "</tool_call>"], false);
 
             // Extract the stop sequence and the content from the inferred chunk.
             let stop_sequence = chunk.encountered_stop_sequence;
@@ -863,7 +895,7 @@ impl<'a> Inference<'a> {
 
 
     /// Set an output value. Especially useful within a `Pipeline`.
-    pub(crate) fn set_output(&mut self, name: impl Display, value: Value) {
+    pub fn set_output(&mut self, name: impl Display, value: Value) {
         self.outputs.insert(name.to_string(), value);
     }
 
@@ -888,6 +920,7 @@ impl<'a> Inference<'a> {
             .infer(
                 None,
                 &[closing_tag],
+                true,
             )
             .content_without_stop_sequence()
             .trim()
@@ -915,7 +948,7 @@ impl<'a> Inference<'a> {
             result.push_str(&suffix_text);
 
             // Then, infer til the closing tag or the beginning of a tool call.
-            let after_suffix = self.infer(None, &[closing_tag, "<tool_call>"]);
+            let after_suffix = self.infer(None, &[closing_tag, "<tool_call>"], true);
 
             // If the inference stopped at a tool call tag then we must roll back to remove the tool call from the context,
             // and then push in a closing tag to properly close the reasoning trace.
@@ -960,7 +993,7 @@ impl<'a> Inference<'a> {
             }
 
             // Generate the content of the channel/block.
-            self.infer(max_tokens, &["<channel|>"])
+            self.infer(max_tokens, &["<channel|>"], true)
                 .content_without_stop_sequence()
                 .trim()
                 .to_string()
@@ -974,7 +1007,7 @@ impl<'a> Inference<'a> {
             }
 
             // Generate the content of the channel/block.
-            self.infer(max_tokens, &[&format!("</{}>", channel_name)])
+            self.infer(max_tokens, &[&format!("</{}>", channel_name)], true)
                 .content_without_stop_sequence()
                 .trim()
                 .to_string()

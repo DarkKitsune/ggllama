@@ -397,7 +397,7 @@ impl Environment for DirectoryEnvironment {
         };
 
         format!(
-            "The environment is a directory in a file system. \
+            "The environment is a directory in a file system.\n\
             You may read or write files within the environment directory, \
             but you may not do anything with files outside of the directory in any way.\n\
             {}\n\
