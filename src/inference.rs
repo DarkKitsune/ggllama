@@ -1,4 +1,4 @@
-use std::{fmt::Display, io::{self, Write}, time::SystemTime};
+use std::{collections::HashMap, fmt::Display, io::{self, Write}, time::SystemTime};
 
 use anyhow::Result;
 use llama_cpp_4::{
@@ -34,9 +34,9 @@ pub struct Suffix {
 
 impl Suffix {
     /// Creates a new `Suffix` instance with the given text and optional triggers.
-    pub fn new(text: String, trigger_with: Option<String>, trigger_without: Option<String>) -> Self {
+    pub fn new(text: impl Display, trigger_with: Option<String>, trigger_without: Option<String>) -> Self {
         Self {
-            text,
+            text: text.to_string(),
             trigger_with,
             trigger_without,
         }
@@ -89,25 +89,25 @@ fn new_sampler_adaptive(creativity: f32, seed: u32) -> LlamaSampler {
 
 /// Helper function to create a new standard sampler.
 /// `is_reasoning` indicates whether the sampler is being used for reasoning tasks.
-fn new_sampler_standard(creativity: f32, seed: u32, is_reasoning: bool) -> LlamaSampler {
+fn new_sampler_standard(model: &LlamaModel, creativity: f32, seed: u32, is_reasoning: bool) -> LlamaSampler {
     // If is_reasoning is true, we increase creativity to avoid loops and explore more reasoning paths
     let creativity = if is_reasoning {
-        creativity + (1.0 - creativity) * 0.5
+        creativity + (1.0 - creativity) * 0.67
     } else {
         creativity
     };
     // Clamp creativity to the range [0.0, 1.0]
     let creativity = creativity.clamp(0.0, 1.0);
-    // top-n-sigma = 0.5 at creativity 0.0, 1.6 at creativity 1.0
-    let top_n_sigma = 0.5 + creativity * 1.1;
-    // temperature = 0.5 at creativity 0.0, 1.5 at creativity 1.0
-    let temperature = 0.5 + creativity * 1.0;
-    // repeat-penalty = 1.0 at creativity 0.0, 1.12 at creativity 1.0
-    let repeat_penalty = 1.0 + creativity.powi(2) * 0.12;
+    // top-n-sigma = 0.4 at creativity 0.0, 1.4 at creativity 1.0
+    let top_n_sigma = 0.4 + creativity;
+    // temperature = 0.2 at creativity 0.0, 1.2 at creativity 1.0
+    let temperature = 0.2 + creativity;
+    // repeat-penalty = 1.0 at creativity 0.0, 1.1 at creativity 1.0
+    let repeat_penalty = 1.0 + creativity.powi(2) * 0.1;
 
     // Create sampler chain which only samples tokens that aren't very unlikely
     LlamaSampler::chain_simple([
-        LlamaSampler::penalties_simple(192, repeat_penalty),
+        LlamaSampler::penalties_simple(model.n_vocab(), 512, repeat_penalty),
         LlamaSampler::top_n_sigma(top_n_sigma),
         LlamaSampler::top_k(30),
         LlamaSampler::temp(temperature),
@@ -553,7 +553,7 @@ impl<'a> Inference<'a> {
         let prefill_tokens_per_second = prefill_token_count as f32 / prefill_duration.as_secs_f32();
 
         // Create a new Sampler based on the current creativity, seed, and reasoning context
-        let mut sampler = new_sampler_standard(self.creativity, self.seed, is_reasoning);
+        let mut sampler = new_sampler_standard(self.model(), self.creativity, self.seed, is_reasoning);
 
         // Generate the next `n` tokens, then convert them to a string and return it.
         let mut output = String::new();
@@ -564,7 +564,7 @@ impl<'a> Inference<'a> {
         for _ in 0..max_tokens.unwrap_or(usize::MAX) {
             // If the seed has changed since the last iteration, create a new sampler with the updated seed.
             if self.seed != last_seed {
-                sampler = new_sampler_standard(self.creativity, self.seed, is_reasoning);
+                sampler = new_sampler_standard(self.model(), self.creativity, self.seed, is_reasoning);
                 last_seed = self.seed;
             }
 
@@ -572,7 +572,7 @@ impl<'a> Inference<'a> {
             if self.tokens_since_last_creativity_nudge >= CREATIVITY_NUDGE_DOWN_EVERY_N {
                 self.creativity =
                     (self.creativity * (CREATIVITY_DOWN_DIVISOR - 1.0)) / CREATIVITY_DOWN_DIVISOR;
-                sampler = new_sampler_standard(self.creativity, self.seed, is_reasoning);
+                sampler = new_sampler_standard(self.model(), self.creativity, self.seed, is_reasoning);
                 self.tokens_since_last_creativity_nudge = 1;
             } else {
                 self.tokens_since_last_creativity_nudge += 1;
@@ -895,8 +895,8 @@ impl<'a> Inference<'a> {
 
 
     /// Set an output value. Especially useful within a `Pipeline`.
-    pub fn set_output(&mut self, name: impl Display, value: Value) {
-        self.outputs.insert(name.to_string(), value);
+    pub fn set_output(&mut self, name: impl Display, value: impl Into<Value>) {
+        self.outputs.insert(name.to_string(), value.into());
     }
 
     /// Generate a reasoning trace in the context, and return the string.

@@ -527,13 +527,18 @@ impl<'a, E: Environment> Agent<'a, E> {
                 .expect("Function name was not a string")
                 .to_string();
 
-            // Get the arguments for the function call from the outputs
+            // Get the arguments for the function call from the outputs, if any
+            // If no arguments are provided, use an empty map.
             let arguments = outputs
-                .get("arguments")
-                .unwrap()
-                .as_object()
-                .cloned()
-                .expect("Function call arguments was not an object");
+                .get("arguments");
+            let arguments = if let Some(arguments) = arguments {
+                arguments
+                    .as_object()
+                    .cloned()
+                    .expect("Function call arguments was not an object")
+            } else {
+                Map::new()
+            };
 
             // Log the function name
             let arg_list = arguments

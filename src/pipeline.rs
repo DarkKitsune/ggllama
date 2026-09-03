@@ -1,3 +1,5 @@
+use std::any::Any;
+
 use crate::{
     chat::{Chat, ChatCheckpoint, ChatRole}, core::{Core, ReasoningLevel}, inference::{Inference, Suffix}, prompt_formatter::{PromptFormatter, TextSection}, util::JsonMap,
 };

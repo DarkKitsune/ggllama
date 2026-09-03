@@ -6,7 +6,7 @@ use llama_cpp_4::{
 use static_init::dynamic;
 
 use crate::{
-    agent::{Capability, Environment, Function}, chat::Chat, inference::{Inference}, pipeline::Pipeline, prompt_formatter::{ListSection, PromptFormatter, TextSection}, util::{JsonMap, JsonValue}, wlog,
+    agent::{Capability, Environment, Function}, chat::Chat, inference::{Inference, Suffix}, pipeline::Pipeline, prompt_formatter::{ListSection, PromptFormatter, TextSection}, util::{JsonMap, JsonValue}, wlog,
 };
 
 /// The number of recurrent states to store from a context's KV cache.
@@ -359,7 +359,74 @@ impl Core {
             multiple_choice_input,
             multiple_choice_output,
             &[],
+            Some(32768),
+            ReasoningLevel::None,
             None,
+        )
+    }
+
+    /// Creates a new pipeline for answering yes/no questions.
+    /// The input hashmap should contain a "question" key with the question text.
+    /// The output will be provided as a boolean under the "output" key in the output hashmap.
+    /// This output will be `true` for yes and `false` for no.
+    pub fn new_yes_no<'a>(&'a self, role: impl Display + 'static) -> Pipeline<'a> {
+        /// Defines the structure of the system prompt.
+        fn yes_no_system(formatter: PromptFormatter, role: String) -> PromptFormatter {
+            formatter
+                .with_section(TextSection::new(
+                    Some("Your Role".to_string()),
+                    role
+                ))
+                .with_section(TextSection::new(
+                    Some("How to Answer".to_string()),
+                    "Respond with '{\"answer\": true}' for yes, and '{\"answer\": false}' for no."
+                ))
+        }
+
+        /// Defines the structure of the input.
+        fn yes_no_input(formatter: PromptFormatter, inputs: &JsonMap) -> Option<PromptFormatter> {
+            formatter
+                .with_section(TextSection::new(Some("Question".to_string()), &inputs["question"]))
+                .into()
+        }
+
+        /// Defines the structure of the output.
+        fn yes_no_output(inference: &mut Inference, _inputs: &JsonMap, _reasoning: Option<String>) {
+            // Begin the JSON block
+            inference.push_text("```json\n{\"answer\": ");
+
+            // Create a checkpoint to redo the answer if it is invalid
+            let checkpoint = inference.create_checkpoint();
+
+            // Loop til we get a valid answer
+            loop {
+                // Infer the answer
+                let answer = inference.infer_output("output", None, &["}"], true).0;
+
+                // Check if the answer is valid (true or false)
+                let answer = answer.as_bool();
+                if let Some(answer) = answer {
+                    break answer;
+                }
+
+                // Restore the checkpoint and try again if the answer is invalid
+                inference.restore_checkpoint(checkpoint.clone());
+            };
+
+            // End the JSON block
+            inference.push_text("\n```");
+        }
+
+        // Create a yes/no pipeline
+        Pipeline::new(
+            self,
+            0.0,
+            false,
+            move |formatter| yes_no_system(formatter, role.to_string()),
+            yes_no_input,
+            yes_no_output,
+            &[],
+            Some(32768),
             ReasoningLevel::None,
             None,
         )
@@ -768,23 +835,53 @@ Example response with a tool call:
         }
 
         /// Defines the structure of the output.
-        fn agent_output(inference: &mut Inference, _inputs: &JsonMap, _reasoning: Option<String>, function_param_names: HashMap<String, Vec<String>>) {
+        fn agent_output(inference: &mut Inference, _inputs: &JsonMap, reasoning: Option<String>, function_param_names: HashMap<String, Vec<String>>) {
             // Begin by pushing the opening tool call tag
             inference.push_text("<tool_call>\n");
 
             // Open the function tag and prepare to infer the function name
             inference.push_text("<function=");
 
-            // Infer the function name
-            let (function_name, _stop_sequence) = inference.infer_output("function_name", None, &[">"], false);
+            // Infer the function name if "I should call the function `" is not present in reasoning,
+            // otherwise, use the reasoning to extract the function name.
+            let function_name = if let Some(reasoning) = reasoning {
+                if reasoning.contains("I should call the function `") {
+                    // Extract the function name indices from the reasoning string
+                    let start_index = reasoning.find("I should call the function `").unwrap() + "I should call the function `".len();
+                    let backtick_index = reasoning[start_index..].find('`');
+
+                    // Extract the function name as a string from the reasoning string
+                    // If the reasoning string does not contain a backtick after the function name, truncate the name and add "..." to indicate that it was truncated.
+                    // We will handle failure outside this function anyway.
+                    let function_name = if let Some(backtick_index) = backtick_index {
+                        let end_index = start_index + backtick_index;
+                        reasoning[start_index..end_index].to_string()
+                    } else {
+
+                        // Truncate by setting end_index to start_index + 20 or the length of the reasoning string, whichever is smaller.
+                        let end_index = (start_index + 20).min(reasoning.len());
+                        format!("{}...", &reasoning[start_index..end_index])
+                    };
+
+                    // Push the function name to the context and set it in the outputs
+                    inference.push_text(&function_name);
+                    inference.set_output("function_name", function_name.clone());
+
+                    function_name
+                } else {
+                    inference.infer_output("function_name", None, &["</function>"], false).0.as_str().unwrap().to_string()
+                }
+            } else {
+                inference.infer_output("function_name", None, &["</function>"], false).0.as_str().unwrap().to_string()
+            };
             // Get the name as a string without any potential surrounding quotes.
-            let function_name = function_name.as_str().unwrap().trim_matches('"').to_string();
+            let function_name = function_name.trim_matches('"');
 
             // Close the function tag
             inference.push_text(">\n");
 
             // Loop over the params (if the function exists) and infer their argument values
-            if let Some(param_names) = function_param_names.get(&function_name) {
+            if let Some(param_names) = function_param_names.get(function_name) {
                 for param_name in param_names {
                     // Push the opening argument tag for this parameter
                     inference.push_text(&format!("<argument={}>\n", param_name));
@@ -820,7 +917,11 @@ Example response with a tool call:
             &[],
             Some(CONTEXT_SIZE),
             reasoning_level,
-            None,
+            Some(Suffix::new(
+                "For this turn, I should call the function `",
+                None,
+                Some("I should call the function".to_string())
+            )),
         )
     }
 
@@ -890,7 +991,7 @@ The agent will be working within an environment described as:
 {}
 ```
 ",
-                    inputs["input"],
+                    inputs["input"].as_str().expect("Expected 'input' to be a string"),
                     capabilities_list,
                     reasoning_level_instruction,
                     environment_prompt,
@@ -909,7 +1010,7 @@ The agent will be working within an environment described as:
         let environment_prompt = environment.environment_prompt(&capabilities);
         Pipeline::new(
             self,
-            0.75,
+            0.5,
             false,
             prompt_enhancement_system,
             move |formatter, inputs| prompt_enhancement_input(formatter, inputs, reasoning_level, &environment_prompt, &capabilities),
