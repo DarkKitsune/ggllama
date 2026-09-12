@@ -1,25 +1,82 @@
 use std::{collections::HashMap, fmt::Display, num::NonZeroU32, path::Path};
 
 use llama_cpp_4::{
-    context::{LlamaContext, params::{LlamaContextParams, LlamaFlashAttnType}}, llama_backend::LlamaBackend, model::{LlamaModel, params::LlamaModelParams}, quantize::GgmlType,
+    context::{LlamaContext, params::{LlamaContextParams, LlamaFlashAttnType}}, llama_backend::LlamaBackend, model::{LlamaModel, params::{LlamaLazyMode, LlamaLoadMode, LlamaModelParams}}, quantize::GgmlType,
 };
 use static_init::dynamic;
 
 use crate::{
-    agent::{Capability, Environment, Function}, chat::Chat, inference::{Inference, Suffix}, pipeline::Pipeline, prompt_formatter::{ListSection, PromptFormatter, TextSection}, util::{JsonMap, JsonValue}, wlog,
+    agent::{Capability, Environment, Function}, chat::Chat, inference::{BATCH_CAPACITY, Inference}, pipeline::Pipeline, prompt_formatter::{ListSection, PromptFormatter, TextSection}, util::{JsonMap, JsonValue}, wlog,
 };
+
+/// Whether to disable logging in the Llama.cpp backend.
+const DISABLE_LLAMA_LOGS: bool = true;
 
 /// The number of recurrent states to store from a context's KV cache.
 /// For models that use recurrent layers, the KV cache may be rolled back by up to this many tokens.
-const NUM_RECURRENT_STATES: u32 = 4;
+const NUM_RECURRENT_STATES: u32 = 0;
+
 
 #[dynamic]
 static BACKEND: LlamaBackend = {
     let mut backend = LlamaBackend::init().unwrap();
-    backend.void_logs();
+    if DISABLE_LLAMA_LOGS {
+        backend.void_logs();
+    }
     backend
 };
 
+/// Defines the type of control tokens the model uses (for things like reasoning and stop tokens)'
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ControlType {
+    Qwen,
+    Gemma,
+    Ifm,
+}
+
+impl ControlType {
+    /// Get the token string for ending a turn
+    pub fn turn_ending(&self) -> &'static str {
+        match self {
+            ControlType::Qwen => "<|im_end|>",
+            ControlType::Gemma => "<turn|>",
+            ControlType::Ifm => "<ifm|endofturn>",
+        }
+    }
+
+    /// Get the token string for opening a reasoning block
+    pub fn reasoning_opening(&self, reasoning_level: ReasoningLevel) -> &'static str {
+        match self {
+            ControlType::Qwen => "<think>",
+            ControlType::Gemma => "<|channel>think",
+            ControlType::Ifm => match reasoning_level {
+                ReasoningLevel::Low => "<ifm|think_faster>",
+                ReasoningLevel::Medium => "<ifm|think_fast>",
+                _ => "<ifm|think>",
+            },
+        }
+    }
+
+    /// Get the token string for closing a reasoning block
+    pub fn reasoning_closing(&self, reasoning_level: ReasoningLevel) -> &'static str {
+        match self {
+            ControlType::Qwen => "</think>",
+            ControlType::Gemma => "<channel|>",
+            ControlType::Ifm => match reasoning_level {
+                ReasoningLevel::Low => "</ifm|think_faster>",
+                ReasoningLevel::Medium => "</ifm|think_fast>",
+                _ => "</ifm|think>",
+            },
+        }
+    }
+}
+
+impl Default for ControlType {
+    fn default() -> Self {
+        ControlType::Qwen // Use Qwen as the default control type because it's the most commonly used and widely supported.
+    }
+}
+    
 /// Represents the level of reasoning effort that should be applied for an inference job.
 /// Not all models will show a difference between Low, Medium and High, but None will always disable reasoning.
 /// Use medium if unsure.
@@ -41,6 +98,16 @@ impl ReasoningLevel {
             ReasoningLevel::Medium => None,
             ReasoningLevel::High => Some("Reasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, \
                 consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer."),
+        }
+    }
+
+    /// Get the default reasoning budget in tokens corresponding to the reasoning level.
+    pub fn reasoning_budget(&self) -> usize {
+        match self {
+            ReasoningLevel::None => 0,
+            ReasoningLevel::Low => 8192,
+            ReasoningLevel::Medium => 16384,
+            ReasoningLevel::High => 32768,
         }
     }
 
@@ -77,7 +144,7 @@ impl Default for CompressionLevel {
 pub struct Core {
     pub model: LlamaModel,
     pub compression: CompressionLevel,
-    pub use_gemma_format: bool,
+    pub control_type: ControlType,
 }
 
 impl Core {
@@ -86,11 +153,13 @@ impl Core {
     pub fn from_model<P: AsRef<Path>>(
         model_path: P,
         context_compression: CompressionLevel,
-        use_gemma_format: bool,
+        control_type: ControlType,
     ) -> Self {
         // Set up model params
         let params = LlamaModelParams::default()
-            .with_n_gpu_layers(200)
+            .with_load_mode(LlamaLoadMode::MmapMlock)
+            .with_lazy_mode(LlamaLazyMode::On)
+            .with_n_gpu_layers(999)
             // No support for MTP (yet)
             .with_load_mtp(false);
 
@@ -100,7 +169,7 @@ impl Core {
         Self {
             model,
             compression: context_compression,
-            use_gemma_format,
+            control_type,
         }
     }
 
@@ -112,11 +181,11 @@ impl Core {
 
     /// Starts a new inference job with a new context.
     /// The `creativity` parameter controls the randomness of the generated output, with higher values resulting in more creative responses.
-    pub fn infer<'a>(&'a self, creativity: f32, seed: Option<u32>, context_size: u32) -> Inference<'a> {
+    pub fn infer<'a>(&'a self, creativity: f32, seed: Option<u32>, context_size: u32, reasoning_level: ReasoningLevel) -> Inference<'a> {
         let ctx_params = LlamaContextParams::default()
             .with_flash_attn_type(LlamaFlashAttnType::Enabled)
             .with_n_ctx(Some(NonZeroU32::new(context_size).expect("context_size must be non-zero")))
-            .with_n_batch(4096)
+            .with_n_batch(BATCH_CAPACITY as u32)
             .with_cache_type_k(match self.compression {
                 CompressionLevel::High => GgmlType::Q8_0,
                 CompressionLevel::Low => GgmlType::Q8_0,
@@ -129,7 +198,7 @@ impl Core {
             });
         let context = self.new_context(ctx_params);
         
-        Inference::new(self, context, vec![], creativity, seed)
+        Inference::new(self, context, vec![], creativity, seed, reasoning_level)
     }
 
     /// Get a reference to the model.
@@ -147,8 +216,9 @@ impl Core {
         creativity: f32,
         seed: Option<u32>,
         context_size: Option<u32>,
+        reasoning_level: ReasoningLevel,
     ) -> Chat<'_> {
-        Chat::new(self, system_prompt.to_string(), creativity, seed, context_size.unwrap_or(65536))
+        Chat::new(self, system_prompt.to_string(), creativity, seed, context_size.unwrap_or(65536), reasoning_level)
     }
 
     /// Creates a new pipeline for summarizing text.
@@ -196,7 +266,6 @@ impl Core {
             &[],
             Some(max_size),
             ReasoningLevel::None,
-            None,
         )
     }
 
@@ -255,7 +324,6 @@ impl Core {
             &[],
             None,
             reasoning_level,
-            None,
         )
     }
 
@@ -361,7 +429,6 @@ impl Core {
             &[],
             Some(32768),
             ReasoningLevel::None,
-            None,
         )
     }
 
@@ -428,7 +495,6 @@ impl Core {
             &[],
             Some(32768),
             ReasoningLevel::None,
-            None,
         )
     }
 
@@ -592,7 +658,6 @@ Be creative, let every character have a chance to shine, and keep the story inte
             &[],
             None,
             reasoning_level,
-            None,
         )
     }
 
@@ -714,7 +779,6 @@ Be creative, let every character have a chance to shine, and keep the story inte
             &[],
             None,
             reasoning_level,
-            None,
         )
     }
 
@@ -725,7 +789,7 @@ Be creative, let every character have a chance to shine, and keep the story inte
     /// The agent will have access to a set of functions that it can call to interact with the environment.
     /// If `use_xhigh_reasoning` is set to true and a model supports it (such as Qwen3.8-27B), the agent will employ an advanced reasoning strategy for decision making.
     pub fn new_agent_pipeline<'a, E: Environment>(&'a self, environment: &E, creativity: f32, reasoning_level: ReasoningLevel, language_capabilities: impl Into<Vec<Capability>>, functions: impl Into<Vec<Function<E>>>) -> Pipeline<'a> {
-        const CONTEXT_SIZE: u32 = 130000;
+        const CONTEXT_SIZE: u32 = 100000;
 
         let functions = functions.into();
         let language_capabilities = language_capabilities.into();
@@ -750,8 +814,7 @@ Be creative, let every character have a chance to shine, and keep the story inte
                     format!(
                         "You are an intelligent agent that can perform tasks in a virtual environment. \n\
                         You are very knowledgeable in many areas including science, technology, and the arts.\n\
-                        You are confident and efficient, and you don't spend unnecessary time on trivial details; \
-                        quick action is better than overthinking.\n\
+                        You are always honest and confident, and you aim to contribute to the best of your abilities.\n\
                         The current state of the environment is as follows:\n```\n{}\n```",
                         environment_string
                     )
@@ -762,12 +825,9 @@ Be creative, let every character have a chance to shine, and keep the story inte
                 prompt = prompt.with_section(TextSection::new(
                     None,
                     "You have the ability to write code within this environment.\n\
-                    All code must be well-structured, scalable and follow best practices, yet small in size and efficient. **Always** smaller implementations.\n\
-                    **Correctness is paramount**; your code should function as intended without errors. If you make mistakes, correct them promptly.\n\
-                    Write comments only at the beginning of your code blocks or function definitions, and make sure they are written concisely with few words. Prefer brevity and clarity.\n\
-                    If making a game or interface, or any other type of design, make sure that everything is well-spaced and visually appealing, \
-                    using all of the available space, with all elements following a natural and logical flow or theme.\n\
-                    Feel free to use **appealing colors, styling, vector graphics, rounded corners, and other modern visual elements** where applicable, to make the product stand out!",
+                    All code must be well-structured, scalable and follow best practices, yet clean and optimized for small size and clear readability. Prefer brevity and clarity.\n\
+                    Correctness is paramount; your code should function as intended without errors. **If you make mistakes, correct them promptly**.\n\
+                    If doing visual or game design of any kind, free to use appealing colors, styling, vector graphics, rounded corners, and other modern visual elements where applicable, to make the product stand out!",
                 ));
             }
 
@@ -776,25 +836,25 @@ Be creative, let every character have a chance to shine, and keep the story inte
                 .with_section(TextSection::new(
                     None,
                     format!(
-"You may use 1 tool call to call 1 function per turn to assist you.
-You should use XML format for all tool calls, between <tool_call> and </tool_call> XML tags.
+"You should use XML format for all tool calls, between <tool_call> and </tool_call> XML tags.
 You may call any of the functions below within <tools></tools> XML tags:
 <tools>
 ```
 {}
 ```
 </tools>
-Do not include any additional text outside of the <tool_call> tags.
 When generating tool calls, you should use the <function=function_name></function> XML tags (on their own lines) to specify the function being called.
-Between these tags you should use <argument name=argument_name></argument> XML tags (on their own lines) to specify the arguments for the function being called.
+For each argument, put the argument name between <arg_key></arg_key> (on one line) and the argument value between <arg_value></arg_value> XML tags (with line breaks).
 
 Example response with a tool call:
 <tool_call>
 <function=example_function>
-<argument=example_param1>
+<arg_key>example_param1</arg_key>
+<arg_value>
 [1, 2, 3]
-</argument>
-<argument=example_param2>
+</arg_value>
+<arg_key>example_param2</arg_key>
+<arg_value>
 {{
     \"user_name\": \"Bob\",
     \"user_info\": {{
@@ -802,7 +862,7 @@ Example response with a tool call:
         \"location\": \"New York\"
     }}
 }}
-</argument>
+</arg_value>
 </function>
 </tool_call>
 ",
@@ -819,12 +879,8 @@ Example response with a tool call:
                     formatter
                     // Task section
                     .with_section(TextSection::new(
-                        Some("Your Task".to_string()),
+                        None,
                         task.as_str().unwrap(),
-                    ))
-                    .with_section(TextSection::new(
-                        Some("When You Complete the Task".to_string()),
-                        "Once you complete the task outlined above, provide a summary of your actions and results using `end_task`.",
                     ))
                 )
             }
@@ -835,59 +891,34 @@ Example response with a tool call:
         }
 
         /// Defines the structure of the output.
-        fn agent_output(inference: &mut Inference, _inputs: &JsonMap, reasoning: Option<String>, function_param_names: HashMap<String, Vec<String>>) {
+        fn agent_output(inference: &mut Inference, _inputs: &JsonMap, _reasoning: Option<String>, function_param_names: HashMap<String, Vec<String>>) {
             // Begin by pushing the opening tool call tag
             inference.push_text("<tool_call>\n");
 
             // Open the function tag and prepare to infer the function name
             inference.push_text("<function=");
 
-            // Infer the function name if "I should call the function `" is not present in reasoning,
-            // otherwise, use the reasoning to extract the function name.
-            let function_name = if let Some(reasoning) = reasoning {
-                if reasoning.contains("I should call the function `") {
-                    // Extract the function name indices from the reasoning string
-                    let start_index = reasoning.find("I should call the function `").unwrap() + "I should call the function `".len();
-                    let backtick_index = reasoning[start_index..].find('`');
-
-                    // Extract the function name as a string from the reasoning string
-                    // If the reasoning string does not contain a backtick after the function name, truncate the name and add "..." to indicate that it was truncated.
-                    // We will handle failure outside this function anyway.
-                    let function_name = if let Some(backtick_index) = backtick_index {
-                        let end_index = start_index + backtick_index;
-                        reasoning[start_index..end_index].to_string()
-                    } else {
-
-                        // Truncate by setting end_index to start_index + 20 or the length of the reasoning string, whichever is smaller.
-                        let end_index = (start_index + 20).min(reasoning.len());
-                        format!("{}...", &reasoning[start_index..end_index])
-                    };
-
-                    // Push the function name to the context and set it in the outputs
-                    inference.push_text(&function_name);
-                    inference.set_output("function_name", function_name.clone());
-
-                    function_name
-                } else {
-                    inference.infer_output("function_name", None, &["</function>"], false).0.as_str().unwrap().to_string()
-                }
-            } else {
-                inference.infer_output("function_name", None, &["</function>"], false).0.as_str().unwrap().to_string()
-            };
+            // Infer the function name
+            let function_name = inference.infer_output("function_name", None, &[">", "\n"], false).0.as_str().unwrap().to_string();
             // Get the name as a string without any potential surrounding quotes.
             let function_name = function_name.trim_matches('"');
 
-            // Close the function tag
-            inference.push_text(">\n");
+            // Newline :)
+            inference.push_text("\n");
 
             // Loop over the params (if the function exists) and infer their argument values
             if let Some(param_names) = function_param_names.get(function_name) {
                 for param_name in param_names {
                     // Push the opening argument tag for this parameter
-                    inference.push_text(&format!("<argument={}>\n", param_name));
+                    inference.push_text(&format!("<arg_key>{}</arg_key>\n<arg_value>\n", param_name));
 
                     // Infer the value for this argument
-                    inference.infer_output("arguments", Some(param_name), &["</argument>", "</parameter>"], true);
+                    let (_argument_value, stop_sequence) = inference.infer_output("arguments", Some(param_name), &["</arg_value>", "</function>"], true);
+                    
+                    // If stop_sequence was not </arg_value> then we push the "</arg_value>" tag manually
+                    if let Some(stop_sequence) = stop_sequence && stop_sequence != "</arg_value>" {
+                        inference.push_text("\n</arg_value>");
+                    }
 
                     // Push a newline after the argument tag
                     inference.push_text("\n");
@@ -917,11 +948,6 @@ Example response with a tool call:
             &[],
             Some(CONTEXT_SIZE),
             reasoning_level,
-            Some(Suffix::new(
-                "For this turn, I should call the function `",
-                None,
-                Some("I should call the function".to_string())
-            )),
         )
     }
 
@@ -956,15 +982,11 @@ Example response with a tool call:
 
             let reasoning_level_instruction = match reasoning_level {
                 ReasoningLevel::High =>
-                    "- Instruct the AI agent to plan and think through each step of the task, exploring all possibilities. **Correctness is key**.\n\
-                    - The final prompt should be clear, concise, and easy to understand, covering all aspects of the task at hand. \
-                    Prefer brevity without sacrificing clarity.\n",
+                    "- Instruct the AI agent to plan and think through each step of the task, exploring all possibilities. **Correctness is key**.\n",
                 ReasoningLevel::Medium => "- The final prompt should be clear, concise, and easy to understand, covering all aspects of the task at hand, \
                     while remaining small in size. Prefer brevity without sacrificing clarity.\n",
                 ReasoningLevel::Low =>
-                    "- Instruct the AI agent to come to a conclusion efficiently and without overthinking. **There is a limited time budget**.\n\
-                    - The final prompt should be clear, concise, and easy to understand, covering all aspects of the task at hand, while remaining small in size. \
-                    Prefer brevity.\n",
+                    "- Instruct the AI agent to come to a conclusion efficiently and without overthinking.\n",
                 ReasoningLevel::None =>
                     "- The agent may not be very capable of its own planning and reasoning. \
                     Therefore the final prompt should be long and detailed, clearly explaining all aspects of the task and expected results/outcome, \
@@ -974,14 +996,19 @@ Example response with a tool call:
             formatter.with_section(TextSection::new(
                 None,
                 format!(
-"Please enhance the following prompt:\n```\n{}\n```
+"Please enhance the following prompt:
+```
+{}
+```
 
 **What to Change/Enhance**:
-- Expand the prompt with additional context and details as needed, using your best judgment.
+- Expand the prompt with additional context and details if they are needed, using your best judgment, but keep it close to the spirit of the original prompt.
+- Ensure that the agent understands the context and the requirements of the task.
 - Outline the steps needed to accomplish the task based on the capabilities of the AI agent: {}.
 {}\
-- Format it clearly using markdown, and make sure it is easy to understand so that the AI agent can follow the instructions correctly.
-- Outline any important details. Do not leave out any critical information.
+- The final prompt should be clear, concise, and easy to understand, covering all aspects of the original prompt.
+- Ensure that the final prompt is comprehensive and leaves no ambiguity for the AI agent.
+- The final product *must* be valid and of utmost quality, so express that in the final prompt.
 
 Understand that **a complex task with too many steps may confuse the AI agent**, as will too many words and directives.
 
@@ -1018,7 +1045,6 @@ The agent will be working within an environment described as:
             &[],
             Some(65536),
             ReasoningLevel::None,
-            None,
         )
     }
 }

@@ -4,6 +4,7 @@ pub mod core;
 pub mod file_environment;
 pub mod inference;
 pub mod json;
+pub mod memory;
 pub mod pipeline;
 pub mod prompt_formatter;
 pub mod scene;

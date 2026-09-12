@@ -1,7 +1,7 @@
 use std::any::Any;
 
 use crate::{
-    chat::{Chat, ChatCheckpoint, ChatRole}, core::{Core, ReasoningLevel}, inference::{Inference, Suffix}, prompt_formatter::{PromptFormatter, TextSection}, util::JsonMap,
+    chat::{Chat, ChatCheckpoint, ChatRole}, core::{Core, ReasoningLevel}, inference::{Inference}, prompt_formatter::{PromptFormatter, TextSection}, util::JsonMap,
 };
 
 /// A pipeline defines a set of inputs and outputs and the processing logic that transforms the inputs into the outputs.
@@ -12,7 +12,6 @@ pub struct Pipeline<'a> {
     restore_checkpoint: Option<ChatCheckpoint>,
     has_run: bool,
     reasoning_level: ReasoningLevel,
-    reasoning_suffix: Option<Suffix>,
 }
 
 impl<'a> Pipeline<'a> {
@@ -27,20 +26,12 @@ impl<'a> Pipeline<'a> {
         example_pairs: &[(JsonMap, JsonMap)],
         context_size: Option<u32>,
         reasoning_level: ReasoningLevel,
-        reasoning_suffix: Option<Suffix>,
     ) -> Self {
         // Initialize the system prompt using the provided system function
         let system_prompt = (system_fn)(PromptFormatter::new());
 
-        // Append reasoning prompt if reasoning is enabled
-        let system_prompt = if let Some(reasoning_instructions) = reasoning_level.get_prompt() {
-            system_prompt.with_section(TextSection::new(None, reasoning_instructions))
-        } else {
-            system_prompt
-        };
-
         // Start the chat
-        let mut chat = core.start_chat(system_prompt, creativity, None, context_size);
+        let mut chat = core.start_chat(system_prompt, creativity, None, context_size, reasoning_level);
 
         // Generate example messages from the example pairs
         for (inputs, outputs) in example_pairs {
@@ -54,7 +45,7 @@ impl<'a> Pipeline<'a> {
             chat.supply_outputs_for_response(Some(outputs.clone()));
 
             // Infer the outputs based on the current state of the chat and the inputs
-            chat.infer_response_ext(false, reasoning_suffix.as_ref(), |inference, reasoning| {
+            chat.infer_response_ext(reasoning_level.is_reasoning_enabled(), |inference, reasoning| {
                 // Call the output function to populate the outputs. We don't do anything else as this should modify the context already.
                 (output_fn)(inference, inputs, reasoning);
             });
@@ -74,7 +65,6 @@ impl<'a> Pipeline<'a> {
             restore_checkpoint,
             has_run: false,
             reasoning_level,
-            reasoning_suffix,
         }
     }
 
@@ -99,7 +89,7 @@ impl<'a> Pipeline<'a> {
         // Infer the outputs based on the current state of the chat and the inputs
         let outputs = self
             .chat
-            .infer_response_ext(self.reasoning_level.is_reasoning_enabled(), self.reasoning_suffix.as_ref(), |inference, reasoning| {
+            .infer_response_ext(self.reasoning_level.is_reasoning_enabled(), |inference, reasoning| {
                 // Call the output function to populate the outputs.
                 (self.output_fn)(inference, inputs, reasoning);
 

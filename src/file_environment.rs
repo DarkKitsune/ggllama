@@ -412,7 +412,7 @@ impl Environment for DirectoryEnvironment {
             // Function to get files in a given relative path within the environment directory.
             Function::new(
                 "list_dir",
-                "Gets all files and subdirectories in `relative_path` within the environment directory, recursively.",
+                "Retrieves an array containing the relative paths of all files and subdirectories in `relative_path` within the environment directory, recursively.",
                 vec![FunctionParameter::new(
                     "relative_path",
                     ParameterType::String,
@@ -452,7 +452,8 @@ impl Environment for DirectoryEnvironment {
             // Function to write contents to a file in the environment directory.
             Function::new(
                 "write_file",
-                "Writes contents to a file in the environment directory. This will overwrite the file if it already exists.",
+                "Writes some text data to a file in the environment directory. This will overwrite the file if it already exists. \
+                Use this to create new files or to make complete changes to a file's contents.",
                 vec![
                     FunctionParameter::new("relative_path", ParameterType::String),
                     FunctionParameter::new("file_contents", ParameterType::Any),
@@ -483,7 +484,8 @@ impl Environment for DirectoryEnvironment {
             // Function to replace a substring in a file in the environment directory with a new substring.
             Function::new(
                 "edit_file",
-                "Replaces the first occurrence of `target` with `replacement` in a file.",
+                "Replaces the first occurrence of `target` with `replacement` in a file. \
+                Use this to make targeted edits to file contents, rather than rewriting the entire file, as it is more efficient and preserves existing content.",
                 vec![
                     FunctionParameter::new("relative_path", ParameterType::String),
                     FunctionParameter::new("target", ParameterType::String),

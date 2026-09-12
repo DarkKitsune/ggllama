@@ -1,7 +1,7 @@
 use std::fmt::{Debug, Display};
 
 use crate::{
-    core::Core, inference::{Inference, InferenceCheckpoint, Suffix}, map, util::JsonMap,
+    core::{Core, ReasoningLevel}, inference::{Inference, InferenceCheckpoint}, map, util::JsonMap,
 };
 
 /// The chat compacts its own context if it exceeds this many tokens
@@ -73,11 +73,18 @@ impl<'a> Chat<'a> {
         creativity: f32,
         seed: Option<u32>,
         context_size_limit: u32,
+        reasoning_level: ReasoningLevel,
     ) -> Self {
-        let system_prompt = system_prompt.to_string();
+        let mut system_prompt = system_prompt.to_string();
+
+        // Append the reasoning level prompt to the system prompt
+        if let Some(reasoning_instructions) = reasoning_level.get_prompt() {
+            system_prompt.push_str("\n");
+            system_prompt.push_str(reasoning_instructions);
+        }
 
         // Begin inference
-        let inference = core.infer(creativity, seed, context_size_limit); // Use double the context size limit for inference to allow for some buffer
+        let inference = core.infer(creativity, seed, context_size_limit, reasoning_level); // Use double the context size limit for inference to allow for some buffer
 
         // Initialize the all_messages and queued_messages vectors with the system prompt
         // We will actually put messages into the Inference's context later when inferring tokens.
@@ -126,7 +133,6 @@ impl<'a> Chat<'a> {
     pub fn infer_response_ext<R>(
         &mut self,
         use_reasoning: bool,
-        reasoning_suffix: Option<&Suffix>,
         mut func: impl FnMut(&mut Inference<'a>, Option<String>) -> R,
     ) -> R {
         // Compact the context if it exceeds the context size limit
@@ -138,7 +144,7 @@ impl<'a> Chat<'a> {
         // Start the response to the queued messages, which also puts them into the context
         let reasoning = self
             .inference
-            .start_response_to_messages(&queued_messages, use_reasoning, reasoning_suffix);
+            .start_response_to_messages(&queued_messages, use_reasoning);
 
         // Call the provided function with the inference and reasoning trace
         let response = func(&mut self.inference, reasoning);
@@ -166,7 +172,7 @@ impl<'a> Chat<'a> {
     ) -> ChatResponse {
         let context_size_limit = self.context_size_limit as usize;
         
-        self.infer_response_ext(use_reasoning, None, |inference, reasoning| {
+        self.infer_response_ext(use_reasoning, |inference, reasoning| {
             // Begin the message with the prefix, if any
             if let Some(prefix) = &prefix {
                 inference.push_text(prefix);
