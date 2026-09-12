@@ -928,8 +928,12 @@ impl<'a> Inference<'a> {
         } else {
             self.push_text("<think>\n</think>\n");
         }*/
-
-        self.push_text(self.control_type.reasoning_closing(self.reasoning_level));
+        let opening_tag = self.control_type.reasoning_opening(self.reasoning_level);
+        self.push_text(opening_tag);
+        self.push_text("\n\n");
+        let closing_tag = self.control_type.reasoning_closing(self.reasoning_level);
+        self.push_text(closing_tag);
+        self.push_text("\n");
     }
 
     /// Terminate the current response message by pushing the EOT token into the context.

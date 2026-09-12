@@ -426,9 +426,9 @@ pub struct Agent<'a, E: Environment> {
 
 impl<'a, E: Environment> Agent<'a, E> {
     /// Creates a new agent with capabilities in the given environment.
-    pub fn new(core: &'a Core, environment: &E, creativity: f32, capabilities: Vec<Capability>, reasoning_level: ReasoningLevel) -> Self {
+    pub fn new(core: &'a Core, environment: &E, creativity: f32, reasoning_level: ReasoningLevel, context_size: Option<u32>, capabilities: Vec<Capability>) -> Self {
         // Create an agent pipeline
-        let mut pipeline = core.new_agent_pipeline(environment, creativity, reasoning_level, capabilities.clone(), environment.get_allowed_functions_with_system_functions(&capabilities));
+        let mut pipeline = core.new_agent_pipeline(environment, creativity, reasoning_level, context_size, capabilities.clone(), environment.get_allowed_functions_with_system_functions(&capabilities));
 
         // Get a checkpoint of the pipeline's chat so that we can reset it after each run.
         let checkpoint = pipeline.chat_mut().create_checkpoint();

@@ -788,8 +788,9 @@ Be creative, let every character have a chance to shine, and keep the story inte
     /// The function name for that turn will be provided under the "function_name" key in the output hashmap, and the arguments for that function will be provided under their names.
     /// The agent will have access to a set of functions that it can call to interact with the environment.
     /// If `use_xhigh_reasoning` is set to true and a model supports it (such as Qwen3.8-27B), the agent will employ an advanced reasoning strategy for decision making.
-    pub fn new_agent_pipeline<'a, E: Environment>(&'a self, environment: &E, creativity: f32, reasoning_level: ReasoningLevel, language_capabilities: impl Into<Vec<Capability>>, functions: impl Into<Vec<Function<E>>>) -> Pipeline<'a> {
-        const CONTEXT_SIZE: u32 = 100000;
+    pub fn new_agent_pipeline<'a, E: Environment>(&'a self, environment: &E, creativity: f32, reasoning_level: ReasoningLevel, context_size: Option<u32>, language_capabilities: impl Into<Vec<Capability>>, functions: impl Into<Vec<Function<E>>>) -> Pipeline<'a> {
+        const DEFAULT_CONTEXT_SIZE: u32 = 100000;
+        let context_size = context_size.unwrap_or(DEFAULT_CONTEXT_SIZE);
 
         let functions = functions.into();
         let language_capabilities = language_capabilities.into();
@@ -946,7 +947,7 @@ Example response with a tool call:
             agent_input,
             move |inference, inputs, reasoning| agent_output(inference, inputs, reasoning, function_param_names.clone()),
             &[],
-            Some(CONTEXT_SIZE),
+            Some(context_size),
             reasoning_level,
         )
     }
@@ -1043,7 +1044,7 @@ The agent will be working within an environment described as:
             move |formatter, inputs| prompt_enhancement_input(formatter, inputs, reasoning_level, &environment_prompt, &capabilities),
             prompt_enhancement_output,
             &[],
-            Some(65536),
+            Some(32768),
             ReasoningLevel::None,
         )
     }
