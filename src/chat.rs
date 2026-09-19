@@ -32,7 +32,7 @@ pub enum ChatRole {
     System,
     User,
     Assistant,
-    Function,
+    Tool,
 }
 
 /// Represents a single message in a chat.
@@ -57,6 +57,8 @@ pub struct Chat<'a> {
     /// This should not be modified directly; upon compacting, memory will be appended to the end.
     system_prompt: String,
     inference: Inference<'a>,
+    /// The amount of reasoning to use for responses, if any.
+    reasoning_level: ReasoningLevel,
     /// Contains all the messages in the chat, including system, user, and assistant messages.
     all_messages: Vec<ChatMessage>,
     /// Contains just the messages that have been queued to be added to the context on the next inferred response.
@@ -79,7 +81,7 @@ impl<'a> Chat<'a> {
 
         // Append the reasoning level prompt to the system prompt
         if let Some(reasoning_instructions) = reasoning_level.get_prompt() {
-            system_prompt.push_str("\n");
+            system_prompt.push_str("\n\n");
             system_prompt.push_str(reasoning_instructions);
         }
 
@@ -101,6 +103,7 @@ impl<'a> Chat<'a> {
             all_messages,
             queued_messages,
             context_size_limit,
+            reasoning_level,
         }
     }
 
@@ -132,8 +135,7 @@ impl<'a> Chat<'a> {
     /// The `Inference` object is passed to the provided function along with an optional reasoning trace if `use_reasoning` was `true`.
     pub fn infer_response_ext<R>(
         &mut self,
-        use_reasoning: bool,
-        mut func: impl FnMut(&mut Inference<'a>, Option<String>) -> R,
+        mut func: impl FnMut(&mut Inference<'a>, Option<String>, &mut bool) -> R,
     ) -> R {
         // Compact the context if it exceeds the context size limit
         self.compact_context();
@@ -144,13 +146,16 @@ impl<'a> Chat<'a> {
         // Start the response to the queued messages, which also puts them into the context
         let reasoning = self
             .inference
-            .start_response_to_messages(&queued_messages, use_reasoning);
+            .start_response_to_messages(&queued_messages, self.reasoning_level.is_reasoning_enabled());
 
         // Call the provided function with the inference and reasoning trace
-        let response = func(&mut self.inference, reasoning);
+        let mut ended_message = false;
+        let response = func(&mut self.inference, reasoning, &mut ended_message);
 
-        // End the message
-        self.inference.end_response();
+        // End the message, if it was not already
+        if !ended_message {
+            self.inference.end_response();
+        }
 
         // Create a new chat message with the inferred response content, and push it to *just* all_messages (it's already in the context)
         let response_content = self.inference.response_content();
@@ -168,11 +173,10 @@ impl<'a> Chat<'a> {
         max_tokens: Option<usize>,
         stop_sequences: &[&str],
         prefix: Option<String>,
-        use_reasoning: bool,
     ) -> ChatResponse {
         let context_size_limit = self.context_size_limit as usize;
         
-        self.infer_response_ext(use_reasoning, |inference, reasoning| {
+        self.infer_response_ext(|inference, reasoning, _ended_message| {
             // Begin the message with the prefix, if any
             if let Some(prefix) = &prefix {
                 inference.push_text(prefix);

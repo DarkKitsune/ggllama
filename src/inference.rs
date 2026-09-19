@@ -19,34 +19,6 @@ const CREATIVITY_UP_DIVISOR: f32 = 5.0;
 /// This is to encourage creativity and avoid the model getting stuck in a loop of repeating the same output after restoring a checkpoint.
 const CHECKPOINT_RESTORE_CREATIVITY_GRACE: usize = 24;
 
-/*
-/// Helper function to create a new adaptive sampler.
-fn new_sampler_adaptive(creativity: f32, seed: u32) -> LlamaSampler {
-    // Clamp creativity
-    let creativity = creativity.clamp(0.0, 1.0);
-
-    // Calculate a mininum probability based on creativity
-    let min_probability = 0.1 + 0.1 * (1.0 - creativity); // 0.2 at creativity 0.0, 0.1 at creativity 1.0
-
-    // Calculate a probability target based on creativity
-    // If creativity is very close zero then set target to -1.0 as this makes the adaptive_p sampler a no-op
-    let target_probability = if creativity < 0.0001 {
-        -1.0
-    } else {
-        1.0 - creativity * 0.5
-    };
-
-    // top_k will be 15 at creativity = 0.0 and 30 at creativity = 1.0
-    let top_k = 15 + (15.0 * creativity) as i32;
-
-    // Create adaptive sampler which only samples tokens that aren't very unlikely
-    LlamaSampler::chain_simple([
-        LlamaSampler::top_k(top_k),
-        LlamaSampler::min_p(min_probability, 1),
-        LlamaSampler::adaptive_p(target_probability, 0.9, seed),
-    ])
-}*/
-
 /// Helper function to create a new standard sampler.
 /// `is_reasoning` indicates whether the sampler is being used for reasoning tasks.
 fn new_sampler_standard(model: &LlamaModel, creativity: f32, seed: u32, is_reasoning: bool) -> LlamaSampler {
@@ -60,36 +32,29 @@ fn new_sampler_standard(model: &LlamaModel, creativity: f32, seed: u32, is_reaso
     // Come up with sampler values based on the modified creativity
     // These should be balanced so that an input creativity of 0.3333 with is_reasoning=true results in temperature being around 1.0
     let creativity = creativity.clamp(0.0, 1.0);
-    let top_n_sigma = 0.5 + creativity;
+    let top_n_sigma = 0.4 + creativity;
     let temperature = 0.3333 + creativity;
     //let repeat_penalty = 1.0 + creativity * 0.2;
-    let dry_base = if is_reasoning {
-        2.15
-    } else {
-        1.35
-    };
-    let dry_range = if is_reasoning {
-        768
-    } else {
-        64
-    };
 
     // Create sampler chain which only samples tokens that aren't very unlikely
-    LlamaSampler::chain_simple([
-        //LlamaSampler::penalties_simple(model.n_vocab(), 480, repeat_penalty),
-        LlamaSampler::dry(
+    let mut samplers = Vec::new();
+    if is_reasoning {
+        // DRY sampler to prevent reasoning loops
+        samplers.push(LlamaSampler::dry(
             model,
             0.8,
-            dry_base,
-            3,
-            dry_range,
-            ["\n", " ", "\t", ";", ":", "{", "}", "[", "]", "(", ")", "\"", "'", "`", "then", "end"]
-        ),
-        LlamaSampler::top_n_sigma(top_n_sigma),
-        LlamaSampler::top_k(20),
-        LlamaSampler::temp(temperature),
-        LlamaSampler::dist(seed),
-    ])
+            1.75,
+            2,
+            1536,
+            ["\n", " ", "\t", ";", ":", ".", "{", "}", "[", "]", "(", ")", "\"", "'", "`", "then", "end"]
+        ));
+    }
+    samplers.push(LlamaSampler::top_n_sigma(top_n_sigma));
+    samplers.push(LlamaSampler::top_k(20));
+    samplers.push(LlamaSampler::temp(temperature));
+    samplers.push(LlamaSampler::dist(seed));
+
+    LlamaSampler::chain_simple(samplers)
 }
 
 /// A single inference result.
@@ -160,7 +125,7 @@ impl ChatRole {
             ChatRole::System => "system",
             ChatRole::User => "user",
             ChatRole::Assistant => "assistant",
-            ChatRole::Function => "function",
+            ChatRole::Tool => "tool",
         }
     }
 }
@@ -573,7 +538,7 @@ impl<'a> Inference<'a> {
             // Convert the token to a string, or use an empty string if conversion fails
             let token_str = self
                 .model()
-                .token_to_str(token, Special::Plaintext)
+                .token_to_str(token, Special::Tokenize)
                 .unwrap_or_default();
 
             // Append the token string to the output after saving the old byte length for truncation
@@ -936,26 +901,46 @@ impl<'a> Inference<'a> {
         self.push_text("\n");
     }
 
-    /// Terminate the current response message by pushing the EOT token into the context.
-    pub(crate) fn end_response(&mut self) {
+    /// Get the token(s) representing the end of the current response message.
+    /// This could be the EOT token, the EOS token, or the control type's turn ending, depending on which is available.
+    pub(crate) fn end_response_tokens(&self) -> Vec<LlamaToken> {
         let eot_token = self.model().token_eot();
 
         if eot_token.0 < 0 {
             let eos_token = self.model().token_eos();
 
             if eos_token.0 < 0 {
-                print!("<No valid EOT or EOS token found, using control type>");
-                self.push_text(self.control_type.turn_ending());
-                self.push_text("\n");
+                let turn_ending = self.control_type.turn_ending();
+                self.model().str_to_token(turn_ending, AddBos::Never).unwrap()
             } else {
-                print!("<EOS token: {:?}>", self.model().token_to_str(eos_token, Special::Plaintext));
-                print!("<EOS token: {:?}>", self.model().token_to_str(eos_token, Special::Tokenize));
-                self.push_tokens(&[eos_token]);
+                vec![eos_token]
             }
         } else {
-            print!("<EOT: {:?}>", self.model().token_to_str(eot_token, Special::Plaintext));
-            print!("<EOT: {:?}>", self.model().token_to_str(eot_token, Special::Tokenize));
-            self.push_tokens(&[eot_token]);
+            vec![eot_token]
         }
+    }
+
+    /// Get the string representation of the end of message token(s).
+    /// This will return the string corresponding to the EOT token, EOS token, or the control type's turn ending, depending on which is available.
+    pub(crate) fn end_response_str(&self) -> String {
+        let eot_token = self.model().token_eot();
+
+        if eot_token.0 < 0 {
+            let eos_token = self.model().token_eos();
+
+            if eos_token.0 < 0 {
+                self.control_type.turn_ending().to_string()
+            } else {
+                self.model().token_to_str(eos_token, Special::Tokenize).unwrap()
+            }
+        } else {
+            self.model().token_to_str(eot_token, Special::Tokenize).unwrap()
+        }
+    }
+
+    /// Terminate the current response message by pushing the EOT token into the context.
+    pub(crate) fn end_response(&mut self) {
+        let end_tokens = self.end_response_tokens();
+        self.push_tokens(&end_tokens);
     }
 }

@@ -330,7 +330,7 @@ pub trait Environment: Sized {
     /// Gets the functions which an agent with the given capabilities is allowed to execute in this environment, plus the system functions.
     fn get_allowed_functions_with_system_functions(&self, capabilities: &[Capability]) -> Vec<Function<Self>> {
         let mut functions = self.get_allowed_functions(capabilities);
-        functions.push(Function::new(
+        /*functions.push(Function::new(
             "end_task",
             "Mark the current task as complete, and notify the user with the given result or summary. \
             This should be the last call you make, once the task is complete, or if you have reached a stopping condition and cannot continue. \
@@ -341,7 +341,7 @@ pub trait Environment: Sized {
             }],
             vec![],
             |_env: &mut Self, _args: &Map<String, serde_json::Value>| Ok(Map::new()),
-        ));
+        ));*/
 
         functions
     }
@@ -447,12 +447,13 @@ impl<'a, E: Environment> Agent<'a, E> {
     }
 
     /// Gives the agent a task and informs it of the available functions, then runs the agent until it has completed its task or reached a stopping condition.
+    /// Returns the final message content from the agent as a `String`.
     pub fn run(
         &mut self,
         environment: &mut E,
         task: impl AsRef<str>,
         log_file: Option<&Path>,
-    ) -> serde_json::Value {
+    ) -> String {
         let task = task.as_ref().to_string();
 
         // If the log file is provided, write all messages in the pipeline chat to the log file before starting the agent loop, overwriting any existing content in the log file.
@@ -462,7 +463,7 @@ impl<'a, E: Environment> Agent<'a, E> {
 
             for message in chat.messages() {
                 log_content.push_str(&format!(
-                    "# **Message from {}**\n{}\n\n---\n\n",
+                    "# **{}**\n{}\n\n---\n\n",
                     message.role.to_chatml_role(),
                     &message.content
                 ));
@@ -476,32 +477,36 @@ impl<'a, E: Environment> Agent<'a, E> {
         // Agent loop
         let mut first_iteration = true;
         let result = loop {
-            // If this is the first iteration, we include the task in the inputs
-            let inputs = if first_iteration {
+            // If this is the first iteration, we include the task in the inputs.
+            // Also log 3 messages instead of 2, in order to to capture the user input message as well.
+            let (inputs, messages_to_log) = if first_iteration {
                 first_iteration = false;
 
-                map! {
-                    "task" => task.clone(),
-                }
+                (
+                    map! {
+                        "task" => task.clone(),
+                    },
+                    3
+                )
             } else {
-                map! {}
+                (map! {}, 2)
             };
 
             // Run the pipeline with the inputs
-            let outputs = self.pipeline.run(&inputs);
+            let mut outputs = self.pipeline.run(&inputs);
 
 
             // Get the chat from the pipeline to feed errors and tool results back into the agent
             let chat = self.pipeline.chat_mut();
 
-            // If log file is provided, append last two chat messages to the log file
+            // If log file is provided, append the last `messages_to_log` chat messages to the log file
             if let Some(log_file) = log_file {
-                let last_two_messages = chat.messages().iter().rev().take(2).collect::<Vec<_>>();
-                if last_two_messages.is_empty() {
+                let last_n_messages = chat.messages().iter().rev().take(messages_to_log).collect::<Vec<_>>();
+                if last_n_messages.is_empty() {
                     panic!("No messages in chat, did the pipeline run fail somehow?");
                 }
 
-                let message_string = last_two_messages.iter().rev().map(|message| {
+                let message_string = last_n_messages.iter().rev().map(|message| {
                     format!(
                         "# **{}**\n{}\n\n---\n\n",
                         message.role.to_chatml_role(),
@@ -521,7 +526,14 @@ impl<'a, E: Environment> Agent<'a, E> {
             
             // Get the function name from the outputs
             let function_name = outputs
-                .get("function_name")
+                .get("function_name");
+
+            // If the function name is None then break with the value of outputs["message_content"]
+            if function_name.is_none() {
+                break outputs.get("message_content").unwrap().as_str().unwrap().to_string();
+            }
+
+            let function_name = function_name
                 .unwrap()
                 .as_str()
                 .expect("Function name was not a string")
@@ -548,11 +560,6 @@ impl<'a, E: Environment> Agent<'a, E> {
                 .join(", ");
             dlog!("\nAgent tried calling function: {}({})", function_name, arg_list);
 
-            // If the function is "end_task", return
-            if function_name == "end_task" {
-                break Value::Object(arguments);
-            }
-
             // Execute the function in the environment
             let function_result = environment.execute_function(
                 &self.capabilities,
@@ -560,8 +567,8 @@ impl<'a, E: Environment> Agent<'a, E> {
                 &arguments,
             );
 
-            // Feed the function result back into the agent
-            match function_result {
+            // Format the function result
+            let content = match function_result {
                 Ok(result) => {
                     // Feed the result back into the agent
                     let (result_json, _successful) = match result {
@@ -572,18 +579,7 @@ impl<'a, E: Environment> Agent<'a, E> {
                     };
 
                     // Convert the result to a pretty JSON string for logging and feeding back into the agent
-                    let content = serde_json::to_string_pretty(&result_json).unwrap();
-
-                    /*
-                    // Log the function result
-                    if successful {
-                        dlog!("Function '{}' executed successfully:\n{}", function_name, content);
-                    } else {
-                        wlog!("Function '{}' failed:\n{}", function_name, content);
-                    }*/
-
-                    // Push the function result to the chat
-                    chat.push_message(ChatRole::Function, content);
+                    serde_json::to_string_pretty(&result_json).unwrap()
                 }
                 Err(e) => {
                     // Log the error
@@ -593,9 +589,12 @@ impl<'a, E: Environment> Agent<'a, E> {
                     });
 
                     // Feed the error to the agent so that it can try to recover and continue its task
-                    chat.push_message(ChatRole::Function, serde_json::to_string_pretty(&error_json).unwrap());
+                    serde_json::to_string_pretty(&error_json).unwrap()
                 }
-            }
+            };
+
+            // Feed the result back to the agent (wrapped in <tool_response></tool_response>)
+            chat.push_message(ChatRole::Tool, format!("<tool_response>\n{}\n</tool_response>", content));
 
             // If log file is provided, append the function result message to the log file
             if let Some(log_file) = log_file {

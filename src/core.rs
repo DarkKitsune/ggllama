@@ -6,7 +6,7 @@ use llama_cpp_4::{
 use static_init::dynamic;
 
 use crate::{
-    agent::{Capability, Environment, Function}, chat::Chat, inference::{BATCH_CAPACITY, Inference}, pipeline::Pipeline, prompt_formatter::{ListSection, PromptFormatter, TextSection}, util::{JsonMap, JsonValue}, wlog,
+    agent::{Capability, Environment, Function}, chat::Chat, inference::{BATCH_CAPACITY, Inference}, pipeline::{Pipeline, PipelineEarlyExit}, prompt_formatter::{ListSection, PromptFormatter, TextSection}, util::{JsonMap, JsonValue},
 };
 
 /// Whether to disable logging in the Llama.cpp backend.
@@ -95,7 +95,8 @@ impl ReasoningLevel {
             ReasoningLevel::None => None,
             ReasoningLevel::Low => Some("Reasoning effort is set to low. Keep your thinking brief and focused, \
                 moving directly to the conclusion without unnecessary elaboration."),
-            ReasoningLevel::Medium => None,
+            // Even though Qwen3.8's chat template doesn't have a "medium" prompt, we use one here to help resist against other parts of the prompt affecting reasoning effort
+            ReasoningLevel::Medium => Some("Reasoning effort is set to medium. Think carefully through the task, but avoid overcomplicating the solution."),
             ReasoningLevel::High => Some("Reasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, \
                 consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer."),
         }
@@ -105,7 +106,7 @@ impl ReasoningLevel {
     pub fn reasoning_budget(&self) -> usize {
         match self {
             ReasoningLevel::None => 0,
-            ReasoningLevel::Low => 8192,
+            ReasoningLevel::Low => 12288,
             ReasoningLevel::Medium => 16384,
             ReasoningLevel::High => 32768,
         }
@@ -157,9 +158,9 @@ impl Core {
     ) -> Self {
         // Set up model params
         let params = LlamaModelParams::default()
-            .with_load_mode(LlamaLoadMode::MmapMlock)
+            .with_load_mode(LlamaLoadMode::Mmap)
             .with_lazy_mode(LlamaLazyMode::On)
-            .with_n_gpu_layers(999)
+            .with_n_gpu_layers(99)
             // No support for MTP (yet)
             .with_load_mtp(false);
 
@@ -224,7 +225,7 @@ impl Core {
     /// Creates a new pipeline for summarizing text.
     /// The text to summarize should be provided as \"input\" in the input hashmap.
     /// The output of the summarization will be provided as \"output\" in the output hashmap.
-    pub fn new_summarizer<'a>(&'a self, max_size: u32) -> Pipeline<'a> {
+    pub fn new_summarizer<'a>(&'a self, context_size: u32) -> Pipeline<'a> {
         /// Defines the structure of the system prompt.
         fn summarization_system(formatter: PromptFormatter) -> PromptFormatter {
             formatter
@@ -250,9 +251,10 @@ impl Core {
         }
 
         /// Defines the structure of the output.
-        fn summarization_output(inference: &mut Inference, _inputs: &JsonMap, _reasoning: Option<String>) {
+        fn summarization_output(inference: &mut Inference, _inputs: &JsonMap, _reasoning: Option<String>) -> Option<PipelineEarlyExit> {
             inference.push_text("Here is the summarized text:\n```\n");
             inference.infer_output("output", None, &["```"], false);
+            None
         }
 
         // Create a summarization pipeline
@@ -264,7 +266,7 @@ impl Core {
             summarization_input,
             summarization_output,
             &[],
-            Some(max_size),
+            Some(context_size),
             ReasoningLevel::None,
         )
     }
@@ -308,9 +310,10 @@ impl Core {
         }
 
         /// Defines the structure of the output.
-        fn json_builder_output(inference: &mut Inference, _inputs: &JsonMap, _reasoning: Option<String>) {
+        fn json_builder_output(inference: &mut Inference, _inputs: &JsonMap, _reasoning: Option<String>) -> Option<PipelineEarlyExit> {
             inference.push_text("## JSON Output\n```json\n");
             inference.infer_output("output", None, &["```"], true);
+            None
         }
 
         // Create a JSON builder pipeline
@@ -378,7 +381,7 @@ impl Core {
         }
 
         /// Defines the structure of the output.
-        fn multiple_choice_output(inference: &mut Inference, inputs: &JsonMap, _reasoning: Option<String>) {
+        fn multiple_choice_output(inference: &mut Inference, inputs: &JsonMap, _reasoning: Option<String>) -> Option<PipelineEarlyExit> {
             // Format the output as a JSON object containing the answer letter.
             inference.push_text("```json\n{\"answer\": \"");
 
@@ -416,6 +419,7 @@ impl Core {
 
             // End the code block already
             inference.push_text("\n```");
+            None
         }
 
         // Create a multiple-choice pipeline
@@ -427,7 +431,7 @@ impl Core {
             multiple_choice_input,
             multiple_choice_output,
             &[],
-            Some(32768),
+            Some(16384),
             ReasoningLevel::None,
         )
     }
@@ -458,7 +462,7 @@ impl Core {
         }
 
         /// Defines the structure of the output.
-        fn yes_no_output(inference: &mut Inference, _inputs: &JsonMap, _reasoning: Option<String>) {
+        fn yes_no_output(inference: &mut Inference, _inputs: &JsonMap, _reasoning: Option<String>) -> Option<PipelineEarlyExit> {
             // Begin the JSON block
             inference.push_text("```json\n{\"answer\": ");
 
@@ -482,6 +486,7 @@ impl Core {
 
             // End the JSON block
             inference.push_text("\n```");
+            None
         }
 
         // Create a yes/no pipeline
@@ -493,301 +498,18 @@ impl Core {
             yes_no_input,
             yes_no_output,
             &[],
-            Some(32768),
+            Some(16384),
             ReasoningLevel::None,
-        )
-    }
-
-    /// Creates a new pipeline for deciding the next turn in a `Scene`.
-    /// This pipeline will determine the next action or dialogue turn for characters, or the next narration turn in the scene based on the current state and inputs.
-    /// The input for this pipeline should include a key "scene" with the string representation of the scene as its value,
-    /// and a key "controllable_characters" with an array of character names that can be controlled by the scene writer.
-    pub fn new_scene_writer<'a>(&'a self, creativity: f32, reasoning_level: ReasoningLevel) -> Pipeline<'a> {
-        /// Defines the structure of the system prompt.
-        fn scene_writer_system(formatter: PromptFormatter) -> PromptFormatter {
-            formatter
-            .with_section(TextSection::new(
-                Some("Your Role".to_string()),
-                "You are a script writer for an adventure game."
-            ))
-            .with_section(TextSection::new(
-                Some("Your Task".to_string()),
-                "The user will give you an unfinished scene under \"Unfinished Scene\". \
-                Please determine the next \"turn\" in the scene, whether it is an action, dialogue, or narration turn."
-            ))
-            .with_section(TextSection::new(
-                Some("Response Format".to_string()),
-"Respond with the next turn in one of the following JSON formats depending on the type.
-If the turn is an action turn, it should follow this format:
-```json
-{\"turn_type\": \"action\", \"character_name\": \"<Controllable Character>\", \"content\": \"<Action Description>\"}
-```
-If the turn is a dialogue turn, it should follow this format:
-```json
-{\"turn_type\": \"dialogue\", \"character_name\": \"<Controllable Character>\", \"content\": \"<Description of Character Speaking>\"}
-```
-If the turn is a regular narration turn, it should follow this format:
-```json
-{\"turn_type\": \"narration\", \"content\": \"<Narration Content>\"}
-```
-Be creative, let every character have a chance to shine, and keep the story interesting!"
-            ))
-        }
-
-        /// Defines the structure of the input for the scene writer pipeline.
-        fn scene_writer_input(formatter: PromptFormatter, inputs: &JsonMap) -> Option<PromptFormatter> {
-            // Get the controllable_characters from inputs
-            let controllable_characters = inputs["controllable_characters"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|c| c.as_str().unwrap().to_string())
-                .collect::<Vec<String>>();
-
-            formatter
-                .with_section(TextSection::new(
-                    Some("Unfinished Scene".to_string()),
-                    inputs["scene"].as_str().unwrap(),
-                ))
-                .with_section(ListSection::new(
-                    Some("Controllable Characters".to_string()),
-                    Some("These are the list of characters who can act in the next turn:".to_string()),
-                    false,
-                    controllable_characters,
-                ))
-                .into()
-        }
-
-        /// Defines the structure of the output.
-        fn scene_writer_output(inference: &mut Inference, inputs: &JsonMap, _reasoning: Option<String>) {
-            // Get the controllable_characters from inputs
-            let controllable_characters = inputs["controllable_characters"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|c| c.as_str().unwrap().to_string())
-                .collect::<Vec<String>>();
-            // Set up for inferring the turn type
-            inference.push_text("```json\n{\"turn_type\": \"");
-
-            // Save the current state of the inference engine.
-            let checkpoint = inference.create_checkpoint();
-
-            // We will loop here upon failure
-            loop {
-                // Infer the turn type
-                let turn_type = inference
-                    .infer_output("turn_type", None, &["\""], false)
-                    .0
-                    .as_str()
-                    .unwrap()
-                    .to_string();
-
-                // If the turn type is invalid, retry.
-                if !["action", "dialogue", "narration"].contains(&turn_type.as_str()) {
-                    wlog!("Invalid turn type inferred: {}. Retrying...", turn_type);
-                    inference.restore_checkpoint(checkpoint.clone());
-                    continue;
-                }
-
-                // Infer the character name if the turn type is dialogue or action
-                let character_name = if turn_type == "dialogue" || turn_type == "action" {
-                    // Set up for inferring the character name
-                    inference.push_text(", \"character_name\": \"");
-
-                    // Infer the character name
-                    let character_name = inference
-                        .infer_output("character_name", None, &["\""], false)
-                        .0
-                        .as_str()
-                        .unwrap()
-                        .to_string();
-
-                    // If the character is not controllable, retry.
-                    if !controllable_characters.contains(&character_name) {
-                        wlog!(
-                            "Invalid character name inferred: {}. Retrying...",
-                            character_name
-                        );
-                        inference.restore_checkpoint(checkpoint.clone());
-                        continue;
-                    }
-
-                    Some(character_name)
-                } else {
-                    None
-                };
-
-                // Set up for inferring the content
-                inference.push_text(", \"content\": \"");
-
-                // If this is a dialogue turn, start off the dialog description with the character's name.
-                if turn_type == "dialogue" {
-                    inference.push_text(&format!("{}: '", character_name.as_ref().unwrap()));
-                }
-
-                // Infer the content
-                let content = inference.infer_output("content", None, &["\""], false).0;
-
-                // If this is a dialogue turn, insert the name back into the beginning of the output.
-                if turn_type == "dialogue" {
-                    (*content) = format!(
-                        "{}: \"{}\"",
-                        character_name.unwrap(),
-                        content.as_str().unwrap()
-                    )
-                    .into();
-                }
-
-                // If we reach here, everything is valid so we can break the loop
-                break;
-            }
-
-            // Finish the the JSON block
-            inference.push_text("}\n```");
-        }
-
-        // Create the pipeline
-        Pipeline::new(
-            self,
-            creativity,
-            false,
-            scene_writer_system,
-            scene_writer_input,
-            scene_writer_output,
-            &[],
-            None,
-            reasoning_level,
-        )
-    }
-
-    /// Creates a new pipeline for parsing a natural language command into a turn from a given character's perspective.
-    /// The inputs to this pipeline are "scene" which is a string representation of the current state of the scene,
-    /// "command" which is the natural language command to be parsed into a turn,
-    /// "character" which is the name of the character from whose perspective the command should be parsed into a turn.
-    /// The outputs of this pipeline are the keys "turn_type" and "content" in a JSON object,
-    /// representing the type of turn, and the content of the turn, respectively.
-    pub fn new_turn_extractor<'a>(&'a self, creativity: f32, reasoning_level: ReasoningLevel) -> Pipeline<'a> {
-        /// Defines the structure of the system prompt
-        fn turn_extractor_system(formatter: PromptFormatter) -> PromptFormatter {
-            formatter
-                .with_section(TextSection::new(
-                    Some("Your Role".to_string()),
-                    "You are an assistant tasked with converting natural language commands into action or dialog turns for characters in a scene."
-                ))
-                .with_section(TextSection::new(
-                    Some("Your Task".to_string()),
-                    "The user will give you the scene so far under \"Scene\", a character named under \"Character\", \
-                    and a command for that character to follow under \"Command\"."
-                ))
-                .with_section(TextSection::new(
-                    Some("How to Respond".to_string()),
-                    "You should respond with JSON representing the character following the command in the scene.\n\
-                    The content should consist of a full description of the action or dialogue.\n\
-                    If the command involves the character performing an action, respond with the following JSON format:
-```json
-{\"turn_type\": \"action\", \"content\": \"<Description of Action>\"}
-```\n\
-                    If the command involves the character speaking, respond with the following JSON format:
-```json
-{\"turn_type\": \"dialogue\", \"content\": \"<Description of Character Speaking>\"}
-```\n\
-                    For example, if the command is \"Do a funny little dance in front of the goblins\" and the character is named \"Alice\", the response could be:
-```json
-{\"turn_type\": \"action\", \"content\": \"Alice performs a funny little dance, to the goblins' amusement.\"}
-```\n\
-                    Make it creative and interesting but concise and easy to read. No more than 3 sentences."
-                ))
-        }
-
-        /// Defines the structure of the input
-        fn turn_extractor_input(formatter: PromptFormatter, inputs: &JsonMap) -> Option<PromptFormatter> {
-            formatter
-                .with_section(TextSection::new(Some("Scene".to_string()), inputs["scene"].as_str().unwrap()))
-                .with_section(TextSection::new(
-                    Some("Character".to_string()),
-                    inputs["character"].as_str().unwrap(),
-                ))
-                .with_section(TextSection::new(
-                    Some("Command".to_string()),
-                    inputs["command"].as_str().unwrap(),
-                ))
-                .into()
-        }
-
-        /// Defines the structure of the output
-        fn turn_extractor_output(inference: &mut Inference, inputs: &JsonMap, _reasoning: Option<String>) {
-            // Extract the character's name from the inputs for later use.
-            let character_name = inputs["character"].as_str().unwrap().trim();
-
-            // Start the JSON and set up for inferring the turn type
-            inference.push_text("```json\n{\"turn_type\": \"");
-
-            // Save the current state of the inference engine.
-            let checkpoint = inference.create_checkpoint();
-
-            // We will loop here upon failure
-            loop {
-                // Infer the turn type
-                let turn_type = inference
-                    .infer_output("turn_type", None, &["\""], false)
-                    .0
-                    .as_str()
-                    .unwrap()
-                    .to_string();
-
-                // If the turn type is invalid, retry.
-                if !["action", "dialogue"].contains(&turn_type.as_str()) {
-                    wlog!("Invalid turn type inferred: {}. Retrying...", turn_type);
-                    inference.restore_checkpoint(checkpoint.clone());
-                    continue;
-                }
-
-                // Set up for inferring the content
-                inference.push_text(", \"content\": \"");
-
-                // If this is a dialogue turn, start off the dialog description with the character's name.
-                if turn_type == "dialogue" {
-                    inference.push_text(&format!("{}: '", character_name));
-                }
-
-                // Infer the content
-                let content = inference.infer_output("content", None, &["\""], false).0;
-
-                // If this is a dialogue turn, insert the name back into the beginning of the output.
-                if turn_type == "dialogue" {
-                    (*content) =
-                        format!("{}: \"{}\"", character_name, content.as_str().unwrap()).into();
-                }
-
-                // If the turn type is valid, break out of the loop.
-                break;
-            }
-
-            // Finish the the JSON block
-            inference.push_text("}\n```");
-        }
-
-        // Create the pipeline
-        Pipeline::new(
-            self,
-            creativity,
-            false,
-            turn_extractor_system,
-            turn_extractor_input,
-            turn_extractor_output,
-            &[],
-            None,
-            reasoning_level,
         )
     }
 
     /// Creates a new pipeline for agent turns. This pipeline can be used to simulate an agent that works within an environment of some type to complete tasks.
     /// When starting a new task, the input hashmap should contain a "task" key with the task for the agent to complete.
     /// If continuing the task, the input hashmap should omit the "task" key.
-    /// The function name for that turn will be provided under the "function_name" key in the output hashmap, and the arguments for that function will be provided under their names.
+    /// The inferred function name for that turn will be returned under the "function_name" key in the output hashmap, and the inferred arguments for that function will be under "arguments".
+    /// If the agent does not call any function during that turn, the "function_name" key will be absent from the output hashmap.
+    /// All other message content will be included under the "message_content" key in the output hashmap.
     /// The agent will have access to a set of functions that it can call to interact with the environment.
-    /// If `use_xhigh_reasoning` is set to true and a model supports it (such as Qwen3.8-27B), the agent will employ an advanced reasoning strategy for decision making.
     pub fn new_agent_pipeline<'a, E: Environment>(&'a self, environment: &E, creativity: f32, reasoning_level: ReasoningLevel, context_size: Option<u32>, language_capabilities: impl Into<Vec<Capability>>, functions: impl Into<Vec<Function<E>>>) -> Pipeline<'a> {
         const DEFAULT_CONTEXT_SIZE: u32 = 100000;
         let context_size = context_size.unwrap_or(DEFAULT_CONTEXT_SIZE);
@@ -815,7 +537,8 @@ Be creative, let every character have a chance to shine, and keep the story inte
                     format!(
                         "You are an intelligent agent that can perform tasks in a virtual environment. \n\
                         You are very knowledgeable in many areas including science, technology, and the arts.\n\
-                        You are always honest and confident, and you aim to contribute to the best of your abilities.\n\
+                        You are always honest and confident, you always improve yourself and fix your mistakes immediately, \
+                        and you aim to contribute to the best of your abilities.\n\
                         The current state of the environment is as follows:\n```\n{}\n```",
                         environment_string
                     )
@@ -826,50 +549,58 @@ Be creative, let every character have a chance to shine, and keep the story inte
                 prompt = prompt.with_section(TextSection::new(
                     None,
                     "You have the ability to write code within this environment.\n\
-                    All code must be well-structured, scalable and follow best practices, yet clean and optimized for small size and clear readability. Prefer brevity and clarity.\n\
-                    Correctness is paramount; your code should function as intended without errors. **If you make mistakes, correct them promptly**.\n\
-                    If doing visual or game design of any kind, free to use appealing colors, styling, vector graphics, rounded corners, and other modern visual elements where applicable, to make the product stand out!",
+                    All code must be well-structured, **scalable** with comments marking where each section begins and ends, and when to edit them.\n\
+                    Optimize your code for small size and clear readability, following best practices. Prefer brevity over verbosity.\n\
+                    Correctness is paramount; your code should function as intended without errors. **If you make mistakes, correct them promptly**.",
                 ));
             }
 
             // Function calls section
-            prompt
+            prompt = prompt
                 .with_section(TextSection::new(
                     None,
                     format!(
 "You should use XML format for all tool calls, between <tool_call> and </tool_call> XML tags.
-You may call any of the functions below within <tools></tools> XML tags:
-<tools>
-```
-{}
-```
-</tools>
-When generating tool calls, you should use the <function=function_name></function> XML tags (on their own lines) to specify the function being called.
-For each argument, put the argument name between <arg_key></arg_key> (on one line) and the argument value between <arg_value></arg_value> XML tags (with line breaks).
 
-Example response with a tool call:
+You may call any of the functions below within <tools></tools> XML tags:
+
+<tools>
+{}
+</tools>
+
+If you choose to call a function ONLY reply in the following format with NO suffix:
+
 <tool_call>
-<function=example_function>
-<arg_key>example_param1</arg_key>
-<arg_value>
-[1, 2, 3]
-</arg_value>
-<arg_key>example_param2</arg_key>
-<arg_value>
-{{
-    \"user_name\": \"Bob\",
-    \"user_info\": {{
-        \"age\": 27,
-        \"location\": \"New York\"
-    }}
-}}
-</arg_value>
+<function=example_function_name>
+<parameter=example_parameter_1>
+value_1
+</parameter>
+<parameter=example_parameter_2>
+This is the value for the second parameter
+that can span
+multiple lines
+</parameter>
 </function>
 </tool_call>
-",
+
+<IMPORTANT>
+Reminder:
+- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags.
+- Required parameters MUST be specified.
+- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after.
+- If there is no function call available, or you get stuck, just respond without a tool call and explain why you could not continue.
+- Once you complete the task, you should respond with ONLY a summary of the actions taken and the results obtained, without including any tool calls.
+</IMPORTANT>",
                         function_jsons
                     )
-                ))
+                ));
+
+            // Thinking section
+            prompt.with_section(TextSection::new(
+                None,
+                "Write using simplified english and shorthand (abbreviations, well-known shorthand, \"...\" as a placeholder for excessively long or obvious information, etc.) \
+                when thinking within <think></think> XML tags, but not inside tool calls or anywhere other than between <think> and </think>.",
+            ))
         }
 
         /// Defines the structure of the input.
@@ -892,15 +623,27 @@ Example response with a tool call:
         }
 
         /// Defines the structure of the output.
-        fn agent_output(inference: &mut Inference, _inputs: &JsonMap, _reasoning: Option<String>, function_param_names: HashMap<String, Vec<String>>) {
-            // Begin by pushing the opening tool call tag
-            inference.push_text("<tool_call>\n");
+        fn agent_output(inference: &mut Inference, _inputs: &JsonMap, _reasoning: Option<String>, function_param_names: HashMap<String, Vec<String>>) -> Option<PipelineEarlyExit> {
+            // Begin by inferring until <tool_call>
+            let (_reasoning, stop_sequence) = inference.infer_output("message_content", None, &["<tool_call>"], false);
 
-            // Open the function tag and prepare to infer the function name
+            // If the stop sequence was not Some("<tool_call>"), exit early as the message is already done
+            if stop_sequence.as_ref().map(String::as_str) != Some("<tool_call>") {
+                return Some(PipelineEarlyExit::EndOfMessage)
+            }
+            inference.push_text("\n");
+
+            /*
+            // Push the comment opening tag and infer the comment of the tool call (forces the model to think about it)
+            inference.push_text("<comment>");
+            let _comment = inference.infer_output("comment", None, &["</comment>"], false).0.as_str().unwrap_or("").to_string();
+
+            inference.push_text("\n");*/
+
+            // Open the function tag infer the function name
             inference.push_text("<function=");
-
-            // Infer the function name
             let function_name = inference.infer_output("function_name", None, &[">", "\n"], false).0.as_str().unwrap().to_string();
+
             // Get the name as a string without any potential surrounding quotes.
             let function_name = function_name.trim_matches('"');
 
@@ -910,15 +653,15 @@ Example response with a tool call:
             // Loop over the params (if the function exists) and infer their argument values
             if let Some(param_names) = function_param_names.get(function_name) {
                 for param_name in param_names {
-                    // Push the opening argument tag for this parameter
-                    inference.push_text(&format!("<arg_key>{}</arg_key>\n<arg_value>\n", param_name));
+                    // Push the opening parameter tag for this argument
+                    inference.push_text(&format!("<parameter={}>\n", param_name));
 
                     // Infer the value for this argument
-                    let (_argument_value, stop_sequence) = inference.infer_output("arguments", Some(param_name), &["</arg_value>", "</function>"], true);
+                    let (_argument_value, stop_sequence) = inference.infer_output("arguments", Some(param_name), &["</parameter>"], true);
                     
-                    // If stop_sequence was not </arg_value> then we push the "</arg_value>" tag manually
-                    if let Some(stop_sequence) = stop_sequence && stop_sequence != "</arg_value>" {
-                        inference.push_text("\n</arg_value>");
+                    // If stop_sequence was not </parameter> then we push the "</parameter>" tag manually
+                    if let Some(stop_sequence) = stop_sequence && stop_sequence != "</parameter>" {
+                        inference.push_text("\n</parameter>");
                     }
 
                     // Push a newline after the argument tag
@@ -932,7 +675,7 @@ Example response with a tool call:
             // Push the closing tool call tag
             inference.push_text("</tool_call>\n");
 
-
+            None
         }
 
         // Get the environment prompt as a string to pass to the agent system function.
@@ -983,15 +726,22 @@ Example response with a tool call:
 
             let reasoning_level_instruction = match reasoning_level {
                 ReasoningLevel::High =>
-                    "- Instruct the AI agent to plan and think through each step of the task, exploring all possibilities. **Correctness is key**.\n",
+                    "- Instruct the AI agent to plan and think through each step of the task, exploring all possibilities. **Correctness is key**.\n\
+                    - The final prompt should be no more than 100 words.\n",
                 ReasoningLevel::Medium => "- The final prompt should be clear, concise, and easy to understand, covering all aspects of the task at hand, \
-                    while remaining small in size. Prefer brevity without sacrificing clarity.\n",
+                    while remaining small in size. Prefer brevity without sacrificing clarity.\n\
+                    - Provide a list of a few approaches or solutions to the task, with brief descriptions for each (no more than 15 words), \
+                    allowing the AI agent to choose the most efficient one or build upon them. Easy, direct, and safe solutions are preferable.\n\
+                    - The final prompt should be no more than 175 words.\n",
                 ReasoningLevel::Low =>
-                    "- Instruct the AI agent to come to a conclusion efficiently and without overthinking.\n",
+                    "- Instruct the AI agent to come to a conclusion efficiently and without overthinking. \n\
+                    - Provide a list of possible approaches or solutions to each critical detail or step towards completing the task, with brief descriptions for each (no more than 20 words), \
+                    and a score indicating the quality or efficiency of each approach, allowing the AI agent to choose the best path to follow without overthinking.\n\
+                    - The final prompt should be no more than 250 words.\n",
                 ReasoningLevel::None =>
                     "- The agent may not be very capable of its own planning and reasoning. \
                     Therefore the final prompt should be long and detailed, clearly explaining all aspects of the task and expected results/outcome, \
-                    exploring multiple possibilities as well as any pitfalls.\n",
+                    exploring multiple possibilities/solutions as well as any pitfalls.\n",
             };
 
             formatter.with_section(TextSection::new(
@@ -1003,15 +753,17 @@ Example response with a tool call:
 ```
 
 **What to Change/Enhance**:
-- Expand the prompt with additional context and details if they are needed, using your best judgment, but keep it close to the spirit of the original prompt.
+- Improve the prompt's wording and expand it with additional context and details if they are needed, using your best judgment, but keep it close to the spirit of the original prompt.
 - Ensure that the agent understands the context and the requirements of the task.
 - Outline the steps needed to accomplish the task based on the capabilities of the AI agent: {}.
 {}\
 - The final prompt should be clear, concise, and easy to understand, covering all aspects of the original prompt.
 - Ensure that the final prompt is comprehensive and leaves no ambiguity for the AI agent.
-- The final product *must* be valid and of utmost quality, so express that in the final prompt.
+- The final product *must* be valid and of utmost quality, as well as polished-looking and visually appealing (if applicable), so express that in the final prompt.
+- Inform the agent that, once the task is completed, they should fix any mistakes, and then call `end_task` to inform the user.
 
 Understand that **a complex task with too many steps may confuse the AI agent**, as will too many words and directives.
+If the AI agent has to write a lot of text or code at one time, it may also become prone to making mistakes or overlooking important details.
 
 **Agent Environment**:
 The agent will be working within an environment described as:
@@ -1029,9 +781,10 @@ The agent will be working within an environment described as:
         }
 
         /// Defines the structure of the output.
-        fn prompt_enhancement_output(inference: &mut Inference, _inputs: &JsonMap, _reasoning: Option<String>) {
+        fn prompt_enhancement_output(inference: &mut Inference, _inputs: &JsonMap, _reasoning: Option<String>) -> Option<PipelineEarlyExit> {
             inference.push_text("Here is the enhanced prompt:\n```\n");
             inference.infer_output("output", None, &["```"], false);
+            None
         }
 
         // Create a prompt enhancement pipeline
@@ -1044,7 +797,7 @@ The agent will be working within an environment described as:
             move |formatter, inputs| prompt_enhancement_input(formatter, inputs, reasoning_level, &environment_prompt, &capabilities),
             prompt_enhancement_output,
             &[],
-            Some(32768),
+            Some(4096),
             ReasoningLevel::None,
         )
     }

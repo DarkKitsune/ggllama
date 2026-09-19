@@ -1,17 +1,20 @@
-use std::any::Any;
-
 use crate::{
-    chat::{Chat, ChatCheckpoint, ChatRole}, core::{Core, ReasoningLevel}, inference::{Inference}, prompt_formatter::{PromptFormatter, TextSection}, util::JsonMap,
+    chat::{Chat, ChatCheckpoint, ChatRole}, core::{Core, ReasoningLevel}, inference::{Inference}, prompt_formatter::PromptFormatter, util::JsonMap,
 };
+
+/// Indicates why a `Pipeline` had to exit early.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PipelineEarlyExit {
+    EndOfMessage,
+}
 
 /// A pipeline defines a set of inputs and outputs and the processing logic that transforms the inputs into the outputs.
 pub struct Pipeline<'a> {
     chat: Chat<'a>,
     input_fn: Box<dyn FnMut(PromptFormatter, &JsonMap) -> Option<PromptFormatter>>,
-    output_fn: Box<dyn FnMut(&mut Inference, &JsonMap, Option<String>)>,
+    output_fn: Box<dyn FnMut(&mut Inference, &JsonMap, Option<String>) -> Option<PipelineEarlyExit>>,
     restore_checkpoint: Option<ChatCheckpoint>,
     has_run: bool,
-    reasoning_level: ReasoningLevel,
 }
 
 impl<'a> Pipeline<'a> {
@@ -22,7 +25,7 @@ impl<'a> Pipeline<'a> {
         use_persistent_memory: bool,
         mut system_fn: impl FnMut(PromptFormatter) -> PromptFormatter + 'static,
         mut input_fn: impl FnMut(PromptFormatter, &JsonMap) -> Option<PromptFormatter> + 'static,
-        mut output_fn: impl FnMut(&mut Inference, &JsonMap, Option<String>) + 'static,
+        mut output_fn: impl FnMut(&mut Inference, &JsonMap, Option<String>) -> Option<PipelineEarlyExit> + 'static,
         example_pairs: &[(JsonMap, JsonMap)],
         context_size: Option<u32>,
         reasoning_level: ReasoningLevel,
@@ -45,9 +48,9 @@ impl<'a> Pipeline<'a> {
             chat.supply_outputs_for_response(Some(outputs.clone()));
 
             // Infer the outputs based on the current state of the chat and the inputs
-            chat.infer_response_ext(reasoning_level.is_reasoning_enabled(), |inference, reasoning| {
+            chat.infer_response_ext(|inference, reasoning, _ended_message| {
                 // Call the output function to populate the outputs. We don't do anything else as this should modify the context already.
-                (output_fn)(inference, inputs, reasoning);
+                let _early_exit = (output_fn)(inference, inputs, reasoning);
             });
         }
 
@@ -64,7 +67,6 @@ impl<'a> Pipeline<'a> {
             output_fn: Box::new(output_fn),
             restore_checkpoint,
             has_run: false,
-            reasoning_level,
         }
     }
 
@@ -89,9 +91,14 @@ impl<'a> Pipeline<'a> {
         // Infer the outputs based on the current state of the chat and the inputs
         let outputs = self
             .chat
-            .infer_response_ext(self.reasoning_level.is_reasoning_enabled(), |inference, reasoning| {
+            .infer_response_ext(|inference, reasoning, ended_message| {
                 // Call the output function to populate the outputs.
-                (self.output_fn)(inference, inputs, reasoning);
+                let early_exit = (self.output_fn)(inference, inputs, reasoning);
+                
+                // If the output function indicated an early exit due to the end of the message, mark the ended_message flag accordingly.
+                if let Some(early_exit) = early_exit && early_exit == PipelineEarlyExit::EndOfMessage {
+                    *ended_message = true;
+                }
 
                 // Return the pipeline result based on the populated outputs.
                 inference.outputs().clone()

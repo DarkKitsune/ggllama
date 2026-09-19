@@ -212,7 +212,7 @@ impl DirectoryEnvironment {
     }
 
     /// Edits a file in the directory wrapped by this environment by replacing the first occurrence of a target substring with a new substring.
-    pub fn edit_file(
+    pub fn replace_in_file(
         &mut self,
         file_path: impl AsRef<Path>,
         target: &str,
@@ -313,28 +313,28 @@ impl DirectoryEnvironment {
         Ok(())
     }*/
 
-    /// Runs the cargo project in the directory wrapped by this environment and returns the output.
-    pub fn run_cargo_project(&self) -> Result<String> {
+    /// Builds the cargo project in the directory wrapped by this environment and returns the output.
+    pub fn build_cargo_project(&self) -> Result<String> {
         // Exit early if Cargo.toml does not exist in the directory wrapped by this environment.
         let cargo_toml_path = self.path.join("Cargo.toml");
         if !cargo_toml_path.exists() {
             return Err(anyhow::anyhow!(
-                "Attempted to run cargo project but no Cargo.toml was found at: {}",
+                "Attempted to build cargo project but no Cargo.toml was found at: {}",
                 cargo_toml_path.display()
             ));
         }
 
         let output = std::process::Command::new("cargo")
-            .arg("run")
+            .arg("build")
             .current_dir(&self.path)
             .output()
-            .map_err(|e| anyhow::anyhow!("Failed to execute `cargo run`: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to execute `cargo build`: {}", e))?;
 
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).to_string())
         } else {
             Err(anyhow::anyhow!(
-                "Panic or error occurred during `cargo run`.\n\nstderr:\n{}",
+                "Panic or error occurred during `cargo build`.\n\nstderr:\n{}",
                 String::from_utf8_lossy(&output.stderr)
             ))
         }
@@ -399,8 +399,8 @@ impl Environment for DirectoryEnvironment {
         format!(
             "The environment is a directory in a file system.\n\
             You may read or write files within the environment directory, \
-            but you may not do anything with files outside of the directory in any way.\n\
-            {}\n\
+            but you may not do anything with files outside of the directory in any way.\n\n\
+            {}\n\n\
             {}",
             self.description,
             file_list_string,
@@ -411,8 +411,8 @@ impl Environment for DirectoryEnvironment {
         vec![
             // Function to get files in a given relative path within the environment directory.
             Function::new(
-                "list_dir",
-                "Retrieves an array containing the relative paths of all files and subdirectories in `relative_path` within the environment directory, recursively.",
+                "list_files",
+                "Retrieves an array containing the relative paths of all files and subdirectories in `relative_path`, recursively.",
                 vec![FunctionParameter::new(
                     "relative_path",
                     ParameterType::String,
@@ -432,7 +432,8 @@ impl Environment for DirectoryEnvironment {
             // Function to read the contents of a file in the environment directory.
             Function::new(
                 "read_file",
-                "Reads the contents of a file in the environment directory.",
+                "Reads the contents of a file in the environment directory, and returns it as a string. \
+                Use this function when you need to view the contents of files.",
                 vec![FunctionParameter::new(
                     "relative_path",
                     ParameterType::String,
@@ -453,7 +454,7 @@ impl Environment for DirectoryEnvironment {
             Function::new(
                 "write_file",
                 "Writes some text data to a file in the environment directory. This will overwrite the file if it already exists. \
-                Use this to create new files or to make complete changes to a file's contents.",
+                Use this function when you need to create new files or to make complete changes to a file's contents.",
                 vec![
                     FunctionParameter::new("relative_path", ParameterType::String),
                     FunctionParameter::new("file_contents", ParameterType::Any),
@@ -483,9 +484,9 @@ impl Environment for DirectoryEnvironment {
             ),
             // Function to replace a substring in a file in the environment directory with a new substring.
             Function::new(
-                "edit_file",
+                "replace_in_file",
                 "Replaces the first occurrence of `target` with `replacement` in a file. \
-                Use this to make targeted edits to file contents, rather than rewriting the entire file, as it is more efficient and preserves existing content.",
+                Use this function when you need to make targeted edits to file contents, rather than rewriting the entire file, as it is more efficient and preserves existing content.",
                 vec![
                     FunctionParameter::new("relative_path", ParameterType::String),
                     FunctionParameter::new("target", ParameterType::String),
@@ -513,7 +514,7 @@ impl Environment for DirectoryEnvironment {
                         .ok_or(anyhow::anyhow!("Argument 'replacement' is not a string"))?
                         .to_string();
 
-                    let result = env.edit_file(file_path, &target, &replacement, false);
+                    let result = env.replace_in_file(file_path, &target, &replacement, false);
                     match result {
                         Ok(_) => Ok(map! {
                             "status" => "success",
@@ -531,7 +532,7 @@ impl Environment for DirectoryEnvironment {
             Function::new(
                 "python_run",
                 "Runs main.py in the environment directory. \
-                Use this function to execute the Python project in the environment directory (if any).",
+                Use this function when you need to execute the Python project in the environment directory (if any).",
                 vec![],
                 vec![
                     Capability::Python,
@@ -552,17 +553,19 @@ impl Environment for DirectoryEnvironment {
                     }
                 },
             ),
-            // Function to run the cargo project in the environment directory.
+            // Function to build the cargo project in the environment directory.
             Function::new(
-                "cargo_run",
-                "Compiles the Rust code in the environment directory and test runs it.",
+                "cargo_build",
+                "Compiles the Rust code in the environment directory. \
+                Also, returns the stdout or stderr output of the executed Rust project, depending on whether it succeeded or failed. \
+                Use this function when you need to build the Rust project in the environment directory.",
                 vec![],
                 vec![
                     Capability::Rust,
                     Capability::FileExecute,
                 ],
                 |env: &mut DirectoryEnvironment, _args: &JsonMap| {
-                    let result = env.run_cargo_project();
+                    let result = env.build_cargo_project();
 
                     match result {
                         Ok(output) => Ok(map! {
