@@ -26,17 +26,19 @@ pub struct DirectoryEnvironment {
     path: PathBuf,
     modified_files: Vec<PathBuf>,
     description: String,
+    confirm_fn: Box<dyn FnMut(&str) -> bool>,
 }
 
 impl DirectoryEnvironment {
     /// Creates a new DirectoryEnvironment with the given path and description.
-    pub fn new(path: impl AsRef<Path>, description: impl Display) -> Self {
+    pub fn new(path: impl AsRef<Path>, description: impl Display, confirm_fn: impl FnMut(&str) -> bool + 'static) -> Self {
         Self {
             path: absolute(path.as_ref()).unwrap_or_else(|_| {
                 panic!("Failed to get absolute path: {}", path.as_ref().display())
             }),
             description: description.to_string(),
             modified_files: Vec::new(),
+            confirm_fn: Box::new(confirm_fn),
         }
     }
 
@@ -135,6 +137,27 @@ impl DirectoryEnvironment {
             .map_err(|e| anyhow::anyhow!("Failed to read file: {}: {}", full_path.display(), e))
     }
 
+    /// Reads the contents of a file in the directory wrapped by this environment, returning only the lines between `start` and `end` line numbers.
+    pub fn read_lines(&self, path: &Path, start: usize, end: usize) -> Result<String> {
+        let content = self.read_file(path, false)?;
+        let lines: Vec<&str> = content.lines().collect();
+        let selected_lines = &lines[start.saturating_sub(1)..end.min(lines.len())];
+        Ok(selected_lines.join("\n"))
+    }
+
+    /// Acts like grep, searching for the line number(s) where a pattern occurs in a file within the directory wrapped by this environment.
+    /// Also returns the content of the matching lines.
+    pub fn grep(&self, file_path: &Path, pattern: &str) -> Result<Vec<(usize, String)>> {
+        let content = self.read_file(file_path, false)?;
+        let mut line_numbers = Vec::new();
+        for (i, line) in content.lines().enumerate() {
+            if line.contains(pattern) {
+                line_numbers.push((i + 1, line.to_string()));
+            }
+        }
+        Ok(line_numbers)
+    }
+
     /// Creates the directory at the given path within the directory wrapped by this environment, including any necessary parent directories.
     /// If the directory already exists, this function does nothing.
     pub fn create_directory(&mut self, dir_path: impl AsRef<Path>) -> Result<()> {
@@ -212,7 +235,7 @@ impl DirectoryEnvironment {
     }
 
     /// Edits a file in the directory wrapped by this environment by replacing the first occurrence of a target substring with a new substring.
-    pub fn replace_in_file(
+    pub fn replace_first(
         &mut self,
         file_path: impl AsRef<Path>,
         target: &str,
@@ -232,33 +255,28 @@ impl DirectoryEnvironment {
         }
     }
 
-    /// Edits a file by replacing the text between the start and end lines with the given replacement text. The start and end lines are inclusive and are 1-indexed.
-    pub fn edit_file_between_lines(
+    /// Edits a file in the directory wrapped by this environment by replacing the contents between `start` and `end` line numbers with a new substring.
+    pub fn replace_lines(
         &mut self,
         file_path: impl AsRef<Path>,
-        start_line: usize,
-        end_line: usize,
+        start: usize,
+        end: usize,
         replacement: &str,
         allow_protected: bool,
     ) -> Result<()> {
         let contents = self.read_file(&file_path, allow_protected)?;
         let mut lines: Vec<&str> = contents.lines().collect();
-        if start_line == 0 || end_line > lines.len() || start_line > end_line {
-            return Err(anyhow::anyhow!(
-                "Invalid line range: {}-{} for file \"{}\" with {} lines",
-                start_line,
-                end_line,
-                file_path.as_ref().display(),
-                lines.len()
-            ));
+        if start.saturating_sub(1) < lines.len() && end.min(lines.len()) > 0 {
+            lines.splice(start.saturating_sub(1)..end.min(lines.len()), [replacement]);
+            let new_contents = lines.join("\n");
+            self.write_file(file_path, &new_contents, allow_protected)?;
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "Invalid line range for file \"{}\"",
+                file_path.as_ref().display()
+            ))
         }
-
-        // Replace the lines between start_line and end_line (inclusive) with the replacement text.
-        lines.splice((start_line - 1)..end_line, replacement.lines());
-
-        let new_contents = lines.join("\n");
-        self.write_file(file_path, &new_contents, allow_protected)?;
-        Ok(())
     }
 
     /// Runs a Python script in the directory wrapped by this environment and returns the output.
@@ -313,10 +331,12 @@ impl DirectoryEnvironment {
         Ok(())
     }*/
 
-    /// Builds the cargo project in the directory wrapped by this environment and returns the output.
-    pub fn build_cargo_project(&self) -> Result<String> {
+    /// Runs the cargo project in the given subdirectory and returns the output.
+    pub fn run_cargo_project(&self, relative_path: &str) -> Result<String> {
+        let path = self.path.join(relative_path);
+
         // Exit early if Cargo.toml does not exist in the directory wrapped by this environment.
-        let cargo_toml_path = self.path.join("Cargo.toml");
+        let cargo_toml_path = path.join("Cargo.toml");
         if !cargo_toml_path.exists() {
             return Err(anyhow::anyhow!(
                 "Attempted to build cargo project but no Cargo.toml was found at: {}",
@@ -325,67 +345,78 @@ impl DirectoryEnvironment {
         }
 
         let output = std::process::Command::new("cargo")
-            .arg("build")
-            .current_dir(&self.path)
+            .arg("run")
+            .current_dir(&path)
             .output()
-            .map_err(|e| anyhow::anyhow!("Failed to execute `cargo build`: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to execute `cargo run`: {}", e))?;
 
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).to_string())
         } else {
             Err(anyhow::anyhow!(
-                "Panic or error occurred during `cargo build`.\n\nstderr:\n{}",
+                "Panic or error occurred during `cargo run`.\n\nstderr:\n{}",
                 String::from_utf8_lossy(&output.stderr)
             ))
         }
     }
 
-    /*
-    /// Runs NPM commands in the directory wrapped by this environment and returns the output.
-    pub fn run_npm_command(&self, args: &[&str]) -> Result<String> {
-        // If the first argument is one that requires a package.json file, ensure it exists.
-        if ["install", "ci", "publish", "link", "unlink", "update", "uninstall"].contains(&args.get(0).unwrap_or(&"")) {
-            let package_json_path = self.path.join("package.json");
-            if !package_json_path.exists() {
-                return Err(anyhow::anyhow!(
-                    "Attempted to run `npm {}` but package.json does not exist in the directory: {}",
-                    args.get(0).unwrap_or(&""),
-                    package_json_path.display()
-                ));
-            }
-        }
+    /// Run arbitrary commands in the directory wrapped by this environment and return the output.
+    pub fn run_command(&mut self, command: &str, args: &[&str], current_dir: &str) -> Result<String> {
+        let output = std::process::Command::new(command)
+            .args(args)
+            .current_dir(&self.path.join(current_dir))
+            .output()
+            .map_err(|e| anyhow::anyhow!("Failed to execute `{}`: {}", command, e))?;
 
-        // Also if there is a package.json file, ensure that the first argument is not "init" or "create" since those commands would overwrite the existing package.json file.
-        let package_json_path = self.path.join("package.json");
-        if package_json_path.exists() && ["init", "create"].contains(&args.get(0).unwrap_or(&"")) {
+        // Exit early if the current directory does not exist within the environment.
+        let full_path = self.path.join(current_dir);
+        if !full_path.exists() {
             return Err(anyhow::anyhow!(
-                "Attempted to run `npm {}` but package.json already exists in the directory: {}",
-                args.get(0).unwrap_or(&""),
-                package_json_path.display()
+                "Attempted to run command in non-existent directory: {}",
+                full_path.display()
             ));
         }
 
-        // Run the NPM command in the directory wrapped by this environment and return the output.
-        let output = std::process::Command::new("npm")
-            .args(args)
-            .current_dir(&self.path)
-            .output()
-            .map_err(|e| anyhow::anyhow!("Failed to execute `npm`: {}", e))?;
+        // Handle whether commands need confirmation, as well as special behavior for certain commands.
+        let needs_confirmation = match command {
+            "cd" => {
+                return Err(anyhow::anyhow!(
+                    "Changing directories with `cd` is not allowed as it is redundant; use the `current_dir` parameter instead."
+                ));
+            },
+            "cat" |
+            "echo" |
+            "grep" |
+            "ls" => false,
+            _ => true,
+        };
+
+        // Get user confirmation
+        let args_str = if args.is_empty() {
+            "".to_string()
+        } else {
+            format!(" {}", args.join(" "))
+        };
+        let confirmed = !needs_confirmation || (self.confirm_fn)(&format!("`{}{}` in `{}`", command, args_str, full_path.display()));
+        if !confirmed {
+            return Err(anyhow::anyhow!("Command execution cancelled by user."));
+        }
 
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).to_string())
         } else {
             Err(anyhow::anyhow!(
-                "NPM command failed.\n\nstderr:\n{}",
+                "Command `{}` failed.\n\nstderr:\n{}",
+                command,
                 String::from_utf8_lossy(&output.stderr)
             ))
         }
-    }*/
+    }
 }
 
 impl Environment for DirectoryEnvironment {
     fn environment_prompt(&self, _capabilities: &[Capability]) -> String {
-        let files = self
+        /*let files = self
             .get_all_files_and_directories(".")
             .into_iter()
             .map(|s| s.display().to_string())
@@ -394,25 +425,23 @@ impl Environment for DirectoryEnvironment {
             "The environment directory is currently empty.".to_string()
         } else {
             format!("\nThe environment directory contains the following files and subdirectories:\n- `{}`", files.join("`\n- `"))
-        };
+        };*/
 
         format!(
             "The environment is a directory in a file system.\n\
             You may read or write files within the environment directory, \
             but you may not do anything with files outside of the directory in any way.\n\n\
-            {}\n\n\
             {}",
             self.description,
-            file_list_string,
         )
     }
 
     fn available_functions(&self) -> Vec<Function<Self>> {
-        vec![
+        vec![/*
             // Function to get files in a given relative path within the environment directory.
             Function::new(
                 "list_files",
-                "Retrieves an array containing the relative paths of all files and subdirectories in `relative_path`, recursively.",
+                "Retrieves an array containing the relative paths of all files and subdirectories in `relative_path`.",
                 vec![FunctionParameter::new(
                     "relative_path",
                     ParameterType::String,
@@ -425,14 +454,39 @@ impl Environment for DirectoryEnvironment {
                         .as_str()
                         .ok_or(anyhow::anyhow!("Argument 'relative_path' is not a string"))?;
                     Ok(map! {
-                        "files" => env.get_all_files_and_directories(relative_path)
+                        "files" => env.get_files(relative_path, false, true)
                     })
                 },
             ),
+            // Grep function
+            Function::new(
+                "grep",
+                "Searches for the specified `pattern` in the file specified by `relative_path`, and returns the lines where the pattern occurs along with their line numbers.",
+                vec![
+                    FunctionParameter::new("relative_path", ParameterType::String),
+                    FunctionParameter::new("pattern", ParameterType::String),
+                ],
+                vec![],
+                |env: &mut DirectoryEnvironment, args: &JsonMap| {
+                    let file_path = args
+                        .get("relative_path")
+                        .ok_or(anyhow::anyhow!("Missing argument: relative_path"))?
+                        .as_str()
+                        .ok_or(anyhow::anyhow!("Argument 'relative_path' is not a string"))?;
+                    let pattern = args
+                        .get("pattern")
+                        .ok_or(anyhow::anyhow!("Missing argument: pattern"))?
+                        .as_str()
+                        .ok_or(anyhow::anyhow!("Argument 'pattern' is not a string"))?;
+                    Ok(map! {
+                        "matches" => env.grep(Path::new(file_path), pattern)?
+                    })
+                },
+            ),*/
             // Function to read the contents of a file in the environment directory.
             Function::new(
                 "read_file",
-                "Reads the contents of a file in the environment directory, and returns it as a string. \
+                "Reads the entire contents of the file specified by `relative_path`, and returns it as a string. \
                 Use this function when you need to view the contents of files.",
                 vec![FunctionParameter::new(
                     "relative_path",
@@ -450,10 +504,46 @@ impl Environment for DirectoryEnvironment {
                     })
                 },
             ),
+            // Function to read just the lines between `start` and `end` from a file in the environment directory.
+            Function::new(
+                "read_lines",
+                "Reads the lines between `start` and `end` from the file specified by `relative_path`, and returns them as a string. \
+                Use this function when you only need a specific portion of a file.",
+                vec![
+                    FunctionParameter::new("relative_path", ParameterType::String),
+                    FunctionParameter::new("start", ParameterType::Number),
+                    FunctionParameter::new("end", ParameterType::Number),
+                ],
+                vec![],
+                |env: &mut DirectoryEnvironment, args: &JsonMap| {
+                    let file_path = args
+                        .get("relative_path")
+                        .ok_or(anyhow::anyhow!("Missing argument: relative_path"))?
+                        .as_str()
+                        .ok_or(anyhow::anyhow!("Argument 'relative_path' is not a string"))?;
+                    let start = args
+                        .get("start")
+                        .ok_or(anyhow::anyhow!("Missing argument: start"))?
+                        .as_u64()
+                        .ok_or(anyhow::anyhow!("Argument 'start' is not a number"))? as usize;
+                    let end = args
+                        .get("end")
+                        .ok_or(anyhow::anyhow!("Missing argument: end"))?
+                        .as_u64()
+                        .ok_or(anyhow::anyhow!("Argument 'end' is not a number"))? as usize;
+                    let contents = env.read_file(file_path, false)?;
+                    let lines: Vec<&str> = contents.lines().collect();
+                    let selected_lines = lines.get(start.saturating_sub(1)..end.min(lines.len()))
+                        .ok_or(anyhow::anyhow!("Invalid line range for file \"{}\"", file_path))?;
+                    Ok(map! {
+                        "lines" => selected_lines.join("\n")
+                    })
+                },
+            ),
             // Function to write contents to a file in the environment directory.
             Function::new(
                 "write_file",
-                "Writes some text data to a file in the environment directory. This will overwrite the file if it already exists. \
+                "Writes some text data to the file specified by `relative_path`. This will overwrite the file if it already exists. \
                 Use this function when you need to create new files or to make complete changes to a file's contents.",
                 vec![
                     FunctionParameter::new("relative_path", ParameterType::String),
@@ -482,10 +572,58 @@ impl Environment for DirectoryEnvironment {
                     })
                 },
             ),
+            // Function to replace everything between `start` and `end` lines in a file with a new substring.
+            Function::new(
+                "replace_lines",
+                "Replaces the lines between `start` and `end` with `replacement` in the file specified by `relative_path`. \
+                Use this function when you need to make targeted edits to specific lines in a file.",
+                vec![
+                    FunctionParameter::new("relative_path", ParameterType::String),
+                    FunctionParameter::new("start", ParameterType::Number),
+                    FunctionParameter::new("end", ParameterType::Number),
+                    FunctionParameter::new("replacement", ParameterType::String),
+                ],
+                vec![
+                    Capability::FileWrite,
+                ],
+                |env: &mut DirectoryEnvironment, args: &JsonMap| {
+                    let file_path = args
+                        .get("relative_path")
+                        .ok_or(anyhow::anyhow!("Missing argument: relative_path"))?
+                        .as_str()
+                        .ok_or(anyhow::anyhow!("Argument 'relative_path' is not a string"))?;
+                    let start = args
+                        .get("start")
+                        .ok_or(anyhow::anyhow!("Missing argument: start"))?
+                        .as_u64()
+                        .ok_or(anyhow::anyhow!("Argument 'start' is not a number"))? as usize;
+                    let end = args
+                        .get("end")
+                        .ok_or(anyhow::anyhow!("Missing argument: end"))?
+                        .as_u64()
+                        .ok_or(anyhow::anyhow!("Argument 'end' is not a number"))? as usize;
+                    let replacement = args
+                        .get("replacement")
+                        .ok_or(anyhow::anyhow!("Missing argument: replacement"))?
+                        .as_str()
+                        .ok_or(anyhow::anyhow!("Argument 'replacement' is not a string"))?;
+                    let contents = env.read_file(file_path, false)?;
+                    let mut lines: Vec<&str> = contents.lines().collect();
+                    if start.saturating_sub(1) < lines.len() && end.min(lines.len()) > start.saturating_sub(1) {
+                        lines.splice(start.saturating_sub(1)..end.min(lines.len()), [replacement]);
+                    } else {
+                        return Err(anyhow::anyhow!("Invalid line range for file \"{}\"", file_path));
+                    }
+                    env.write_file(file_path, &lines.join("\n"), false)?;
+                    Ok(map! {
+                        "status" => "success"
+                    })
+                },
+            ),
             // Function to replace a substring in a file in the environment directory with a new substring.
             Function::new(
-                "replace_in_file",
-                "Replaces the first occurrence of `target` with `replacement` in a file. \
+                "replace_first",
+                "Replaces the first occurrence of `target` with `replacement` in the file specified by `relative_path`. \
                 Use this function when you need to make targeted edits to file contents, rather than rewriting the entire file, as it is more efficient and preserves existing content.",
                 vec![
                     FunctionParameter::new("relative_path", ParameterType::String),
@@ -514,7 +652,7 @@ impl Environment for DirectoryEnvironment {
                         .ok_or(anyhow::anyhow!("Argument 'replacement' is not a string"))?
                         .to_string();
 
-                    let result = env.replace_in_file(file_path, &target, &replacement, false);
+                    let result = env.replace_first(file_path, &target, &replacement, false);
                     match result {
                         Ok(_) => Ok(map! {
                             "status" => "success",
@@ -527,94 +665,58 @@ impl Environment for DirectoryEnvironment {
                     }
                 },
             ),
-
-            // Function to run a Python script in the environment directory.
+            // Function to run a shell command in the environment directory.
             Function::new(
-                "python_run",
-                "Runs main.py in the environment directory. \
-                Use this function when you need to execute the Python project in the environment directory (if any).",
-                vec![],
+                "run_command",
+                "Runs one or more shell commands (e.g., `ls -la`) in the environment directory, using `working_directory` as the working directory. \
+                Use this function when you need to execute arbitrary shell commands within the environment. \
+                Separate multiple commands with semicolons. This is a very simple command parser which does NOT support `&&`, `|`, `>` or variables. \
+                Many commands will require confirmation from the user, so use this function with caution.",
                 vec![
-                    Capability::Python,
-                    Capability::FileExecute,
-                ],
-                |env: &mut DirectoryEnvironment, _args: &JsonMap| {
-                    let result = env.run_python("main.py");
-
-                    match result {
-                        Ok(output) => Ok(map! {
-                            "output" => output,
-                            "status" => "success"
-                        }),
-                        Err(e) => Ok(map! {
-                            "error" => e.to_string(),
-                            "status" => "error"
-                        }),
-                    }
-                },
-            ),
-            // Function to build the cargo project in the environment directory.
-            Function::new(
-                "cargo_build",
-                "Compiles the Rust code in the environment directory. \
-                Also, returns the stdout or stderr output of the executed Rust project, depending on whether it succeeded or failed. \
-                Use this function when you need to build the Rust project in the environment directory.",
-                vec![],
-                vec![
-                    Capability::Rust,
-                    Capability::FileExecute,
-                ],
-                |env: &mut DirectoryEnvironment, _args: &JsonMap| {
-                    let result = env.build_cargo_project();
-
-                    match result {
-                        Ok(output) => Ok(map! {
-                            "output" => output,
-                            "status" => "success"
-                        }),
-                        Err(e) => Ok(map! {
-                            "error" => e.to_string(),
-                            "status" => "error"
-                        }),
-                    }
-                },
-            ),/*
-            // Function to run an NPM command in the environment directory.
-            Function::new(
-                "npm_run",
-                "Runs the given NPM command in the environment director.",
-                vec![
-                    FunctionParameter::new("args", ParameterType::Array, "The arguments to pass to the NPM command."),
+                    FunctionParameter::new("command", ParameterType::String),
+                    FunctionParameter::new("working_directory", ParameterType::String),
                 ],
                 vec![
-                    Capability::JavaScript,
-                    Capability::FileWrite,
-                    Capability::FileExecute,
+                    Capability::RunCommand,
                 ],
                 |env: &mut DirectoryEnvironment, args: &JsonMap| {
-                    let args_str = args
-                        .get("args")
-                        .ok_or(anyhow::anyhow!("Missing argument: args"))?
-                        .as_array()
-                        .ok_or(anyhow::anyhow!("Argument 'args' is not an array"))?
-                        .iter()
-                        .map(|v| v.as_str().ok_or(anyhow::anyhow!("Argument 'args' contains a non-string value")).map(|s| s.to_string()))
-                        .collect::<Result<Vec<String>>>()?;
-                    let args_ref: Vec<&str> = args_str.iter().map(|s| s.as_str()).collect();
-                    let result = env.run_npm_command(&args_ref);
+                    let command = args
+                        .get("command")
+                        .ok_or(anyhow::anyhow!("Missing argument: command"))?
+                        .as_str()
+                        .ok_or(anyhow::anyhow!("Argument 'command' is not a string"))?;
+                    let working_directory = args
+                        .get("working_directory")
+                        .ok_or(anyhow::anyhow!("Missing argument: working_directory"))?
+                        .as_str()
+                        .ok_or(anyhow::anyhow!("Argument 'working_directory' is not a string"))?;
 
-                    match result {
-                        Ok(output) => Ok(map! {
-                            "output" => output,
-                            "status" => "success"
-                        }),
-                        Err(e) => Ok(map! {
-                            "error" => e.to_string(),
-                            "status" => "error"
-                        }),
+                    // First split over all semicolons to handle multiple commands.
+                    let commands: Vec<&str> = command.split(';').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+
+                    let mut outputs = Vec::new();
+                    for cmd in commands {
+                        let command_parts: Vec<&str> = cmd.split_whitespace().collect();
+                        let command_name = command_parts[0];
+                        let command_args = &command_parts[1..];
+                        let result = env.run_command(command_name, command_args, working_directory);
+
+                        match result {
+                            Ok(output) => outputs.push(map! {
+                                "output" => output,
+                                "status" => "success"
+                            }),
+                            Err(e) => outputs.push(map! {
+                                "error" => e.to_string(),
+                                "status" => "error"
+                            }),
+                        }
                     }
+                    Ok(map! {
+                        "results" => outputs
+                    })
                 },
-            ),*/
+            ),
         ]
     }
 }

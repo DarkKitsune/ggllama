@@ -3,7 +3,7 @@ use std::{
 };
 
 use anyhow::Result;
-use serde_json::{Map, Value};
+use serde_json::Map;
 
 use crate::{
     chat::{ChatCheckpoint, ChatRole}, core::{Core, ReasoningLevel}, dlog, map, pipeline::Pipeline, wlog,
@@ -17,6 +17,7 @@ pub enum Capability {
     JavaScript,
     FileWrite,
     FileExecute,
+    RunCommand,
     SpawnSubAgent(Vec<Capability>),
     Other(String),
 }
@@ -37,7 +38,8 @@ impl Display for Capability {
             Capability::Python => write!(f, "working with Python code"),
             Capability::Rust => write!(f, "working with Rust code"),
             Capability::FileWrite => write!(f, "modifying files"),
-            Capability::FileExecute => write!(f, "executing code files"),
+            Capability::RunCommand => write!(f, "running system/shell commands"),
+            Capability::FileExecute => write!(f, "executing/building code files"),
             Capability::JavaScript => write!(f, "working with JavaScript code"),
             Capability::SpawnSubAgent(_) => write!(f, "spawning sub-agents with specific capabilities"),
             Capability::Other(s) => write!(f, "{}", s),
@@ -329,16 +331,16 @@ pub trait Environment: Sized {
 
     /// Gets the functions which an agent with the given capabilities is allowed to execute in this environment, plus the system functions.
     fn get_allowed_functions_with_system_functions(&self, capabilities: &[Capability]) -> Vec<Function<Self>> {
-        let mut functions = self.get_allowed_functions(capabilities);
-        /*functions.push(Function::new(
-            "end_task",
-            "Mark the current task as complete, and notify the user with the given result or summary. \
-            This should be the last call you make, once the task is complete, or if you have reached a stopping condition and cannot continue. \
-            The result or summary should be a concise description of what was accomplished, or the reason why the task could not be completed.",
+        let functions = self.get_allowed_functions(capabilities);
+
+        /*// Web search function
+        functions.push(Function::new(
+            "web_search",
+            "Perform a web search with the given query and return the results.",
             vec![FunctionParameter {
-                name: "result".to_string(),
+                name: "query".to_string(),
                 param_type: ParameterType::String,
-            }],
+            }],c
             vec![],
             |_env: &mut Self, _args: &Map<String, serde_json::Value>| Ok(Map::new()),
         ));*/
@@ -493,8 +495,7 @@ impl<'a, E: Environment> Agent<'a, E> {
             };
 
             // Run the pipeline with the inputs
-            let mut outputs = self.pipeline.run(&inputs);
-
+            let outputs = self.pipeline.run(&inputs);
 
             // Get the chat from the pipeline to feed errors and tool results back into the agent
             let chat = self.pipeline.chat_mut();

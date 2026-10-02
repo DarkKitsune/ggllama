@@ -96,7 +96,8 @@ impl ReasoningLevel {
             ReasoningLevel::Low => Some("Reasoning effort is set to low. Keep your thinking brief and focused, \
                 moving directly to the conclusion without unnecessary elaboration."),
             // Even though Qwen3.8's chat template doesn't have a "medium" prompt, we use one here to help resist against other parts of the prompt affecting reasoning effort
-            ReasoningLevel::Medium => Some("Reasoning effort is set to medium. Think carefully through the task, but avoid overcomplicating the solution."),
+            ReasoningLevel::Medium => Some("Reasoning effort is set to medium. Think through the task, validate key assumptions, consider SOME plausible alternatives, \
+                but avoid overthinking and unnecessary elaboration; very briefly focus on the most critical or relevant aspects before you move to the conclusion."),
             ReasoningLevel::High => Some("Reasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, \
                 consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer."),
         }
@@ -155,14 +156,14 @@ impl Core {
         model_path: P,
         context_compression: CompressionLevel,
         control_type: ControlType,
+        gpu_layers: u32,
     ) -> Self {
         // Set up model params
         let params = LlamaModelParams::default()
             .with_load_mode(LlamaLoadMode::Mmap)
             .with_lazy_mode(LlamaLazyMode::On)
-            .with_n_gpu_layers(99)
-            // No support for MTP (yet)
-            .with_load_mtp(false);
+            .with_n_gpu_layers(gpu_layers)
+            .with_load_mtp(false); // No support for MTP (yet)
 
         // Load the model
         let model = LlamaModel::load_from_file(&BACKEND, model_path, &params).unwrap();
@@ -176,7 +177,7 @@ impl Core {
 
     /// Creates a new context with the specified parameters. Also creates a draft context if MTP is enabled.
     fn new_context<'a>(&'a self, ctx_params: LlamaContextParams) -> LlamaContext<'a> {
-        let ctx_params = ctx_params.with_n_rs_seq(NUM_RECURRENT_STATES);
+        let ctx_params = ctx_params;//.with_n_rs_seq(NUM_RECURRENT_STATES);
         self.model.new_context(&BACKEND, ctx_params.clone()).unwrap()
     }
 
@@ -530,16 +531,27 @@ impl Core {
 
         /// Defines the structure of the system prompt.
         fn agent_system(formatter: PromptFormatter, environment_string: &str, function_jsons: &str, language_capabilities: &[Capability]) -> PromptFormatter {
-            // Role & environment section
             let mut prompt = formatter
+                // Role section
                 .with_section(TextSection::new(
-                    None,
+                    Some("Role".to_string()),
+                    "You are an intelligent AI agent that can perform tasks by calling functions in a virtual environment. \n\
+                    You are very knowledgeable in many areas including science, technology, and the arts.\n\
+                    You are confident and precise, applying critical thinking, and making well-reasoned decisions.\n\
+                    You always verify your work and correct any mistakes promptly, ensuring the accuracy and reliability of your actions."
+                ))
+                // Environment section
+                .with_section(TextSection::new(
+                    Some("Environment".to_string()),
                     format!(
-                        "You are an intelligent agent that can perform tasks in a virtual environment. \n\
-                        You are very knowledgeable in many areas including science, technology, and the arts.\n\
-                        You are always honest and confident, you always improve yourself and fix your mistakes immediately, \
-                        and you aim to contribute to the best of your abilities.\n\
-                        The current state of the environment is as follows:\n```\n{}\n```",
+                        "The user will give you a task to complete within the virtual environment.\n\
+                        You can interact with the environment by calling the appropriate functions, which are listed in the \"Function Calls\" section.\n\
+                        \n\
+                        The current state of the environment is as follows:\n\
+                        \n\
+                        <environment>\n\
+                        {}\n\
+                        </environment>",
                         environment_string
                     )
                 ));
@@ -547,18 +559,20 @@ impl Core {
             // Coding section if the agent can write code
             if language_capabilities.iter().any(|capability| capability.can_code()) {
                 prompt = prompt.with_section(TextSection::new(
-                    None,
-                    "You have the ability to write code within this environment.\n\
-                    All code must be well-structured, **scalable** with comments marking where each section begins and ends, and when to edit them.\n\
-                    Optimize your code for small size and clear readability, following best practices. Prefer brevity over verbosity.\n\
-                    Correctness is paramount; your code should function as intended without errors. **If you make mistakes, correct them promptly**.",
+                    Some("Coding".to_string()),
+                    "You are a confident, expert full-stack programmer.\n\
+                    You know your way around all aspects of software development from architecture, to bug fixing, to visual design.\n\
+                    All code must be well-structured, **scalable** with comments marking where each section begins and ends, and describing when/how to edit them.\n\
+                    Optimize your code for small size and clear readability, following best practices. Prefer short code over long code, without sacrificing function or clarity.\n\
+                    Correctness is paramount. **If you make mistakes, correct them promptly**.\n\
+                    Unless necessary, make only small, targeted edits to source code files, rather than large, sweeping changes or entire rewrites.",
                 ));
             }
 
             // Function calls section
             prompt = prompt
                 .with_section(TextSection::new(
-                    None,
+                    Some("Function Calls".to_string()),
                     format!(
 "You should use XML format for all tool calls, between <tool_call> and </tool_call> XML tags.
 
@@ -568,28 +582,53 @@ You may call any of the functions below within <tools></tools> XML tags:
 {}
 </tools>
 
-If you choose to call a function ONLY reply in the following format with NO suffix:
+
+If you choose to call a function ONLY reply with the tool call with NO suffix (you may reason BEFORE the <tool_call> tag, but NOT after).
+Tool calls should follow the following format:
 
 <tool_call>
-<function=example_function_name>
-<parameter=example_parameter_1>
-value_1
-</parameter>
-<parameter=example_parameter_2>
-This is the value for the second parameter
-that can span
-multiple lines
+<function=...>
+<parameter=...>
+...
 </parameter>
 </function>
 </tool_call>
 
+Within <tool_call> XML tags, include the name of the function you want to call after `<function=` and values for its parameters as shown in the example below:
+
+**Example**: Getting the weather forecast in Los Angeles, California on a specific date**:
+```
+Let me get the weather in Los Angeles, California on the day the user specified.
+<tool_call>
+<function=get_weather>
+<parameter=location>
+Los Angeles, California
+</parameter>
+<parameter=date>
+2024-06-15
+</parameter>
+</function>
+</tool_call>
+```
+
+The function will respond as `tool` with the result of the function call between <tool_response></tool_response> XML tags, like this:
+```
+<tool_response>
+This is an example response from a function call.
+It represents the result returned by the function, and can span multiple lines.
+</tool_response>
+```
+
 <IMPORTANT>
 Reminder:
+- You may make ONLY 1 function call per response. Wait until the matching `tool` response before making another call.
 - Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags.
-- Required parameters MUST be specified.
+- The function's name provided MUST be in the list of available tools. Do not call functions that are not listed in the <tools></tools> section.
+- All required parameters MUST be specified.
 - You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after.
 - If there is no function call available, or you get stuck, just respond without a tool call and explain why you could not continue.
 - Once you complete the task, you should respond with ONLY a summary of the actions taken and the results obtained, without including any tool calls.
+- Do not make any destructive function calls, without express permission first. Do NOT overwrite existing files unless necessary.
 </IMPORTANT>",
                         function_jsons
                     )
@@ -597,8 +636,8 @@ Reminder:
 
             // Thinking section
             prompt.with_section(TextSection::new(
-                None,
-                "Write using simplified english and shorthand (abbreviations, well-known shorthand, \"...\" as a placeholder for excessively long or obvious information, etc.) \
+                Some("Thinking".to_string()),
+                "Write using simplified english and shorthand (abbreviations, well-known shorthand, placeholders, etc.) \
                 when thinking within <think></think> XML tags, but not inside tool calls or anywhere other than between <think> and </think>.",
             ))
         }
@@ -611,7 +650,7 @@ Reminder:
                     formatter
                     // Task section
                     .with_section(TextSection::new(
-                        None,
+                        Some("Your Task".to_string()),
                         task.as_str().unwrap(),
                     ))
                 )
@@ -632,13 +671,6 @@ Reminder:
                 return Some(PipelineEarlyExit::EndOfMessage)
             }
             inference.push_text("\n");
-
-            /*
-            // Push the comment opening tag and infer the comment of the tool call (forces the model to think about it)
-            inference.push_text("<comment>");
-            let _comment = inference.infer_output("comment", None, &["</comment>"], false).0.as_str().unwrap_or("").to_string();
-
-            inference.push_text("\n");*/
 
             // Open the function tag infer the function name
             inference.push_text("<function=");
@@ -699,7 +731,13 @@ Reminder:
     /// The prompt to be enhanced should be provided under the "input" key in the input hashmap.
     /// The enhanced prompt will be returned under the "output" key in the output hashmap.
     /// `reasoning_level` and `capabilities` should match the values used for the agent.
-    pub fn new_task_prompt_enhancer<'a, E: Environment>(&'a self, reasoning_level: ReasoningLevel, environment: &E, capabilities: Vec<Capability>) -> Pipeline<'a> {
+    pub fn new_task_prompt_enhancer<'a, E: Environment>(&'a self, reasoning_level: ReasoningLevel, environment: &E, capabilities: Vec<Capability>, functions: impl IntoIterator<Item = Function<E>>) -> Pipeline<'a> {
+        let function_jsons = functions
+            .into_iter()
+            .map(|f| serde_json::to_string_pretty(&f.to_json()).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+
         /// Defines the structure of the system prompt.
         fn prompt_enhancement_system(formatter: PromptFormatter) -> PromptFormatter {
             formatter
@@ -710,7 +748,7 @@ Reminder:
         }
 
         /// Defines the structure of the input.
-        fn prompt_enhancement_input(formatter: PromptFormatter, inputs: &JsonMap, reasoning_level: ReasoningLevel, environment_prompt: &str, capabilities: &[Capability]) -> Option<PromptFormatter> {
+        fn prompt_enhancement_input(formatter: PromptFormatter, inputs: &JsonMap, reasoning_level: ReasoningLevel, environment_prompt: &str, capabilities: &[Capability], function_jsons: &str) -> Option<PromptFormatter> {
             // Format capabilities into a list like "a, b, c, and d"
             let capabilities_list = capabilities.iter().map(|c| c.to_string()).collect::<Vec<_>>();
             let capabilities_list = match capabilities_list.len() {
@@ -727,17 +765,20 @@ Reminder:
             let reasoning_level_instruction = match reasoning_level {
                 ReasoningLevel::High =>
                     "- Instruct the AI agent to plan and think through each step of the task, exploring all possibilities. **Correctness is key**.\n\
-                    - The final prompt should be no more than 100 words.\n",
+                    - The final prompt should be no more than 100 words.\n\
+                    - The agent is well experienced and capable of handling complex tasks, so provide minimal guidance and allow them to leverage their expertise.\n",
                 ReasoningLevel::Medium => "- The final prompt should be clear, concise, and easy to understand, covering all aspects of the task at hand, \
                     while remaining small in size. Prefer brevity without sacrificing clarity.\n\
-                    - Provide a list of a few approaches or solutions to the task, with brief descriptions for each (no more than 15 words), \
+                    - Provide a list of a few approaches or solutions to each critical detail or step towards completing the task, with brief descriptions for each (no more than 15 words), \
                     allowing the AI agent to choose the most efficient one or build upon them. Easy, direct, and safe solutions are preferable.\n\
-                    - The final prompt should be no more than 175 words.\n",
+                    - The final prompt should be no more than 175 words.\n\
+                    - The agent can think for themself to a degree, but they may not be as experienced, so may need a bit of guidance.\n",
                 ReasoningLevel::Low =>
                     "- Instruct the AI agent to come to a conclusion efficiently and without overthinking. \n\
                     - Provide a list of possible approaches or solutions to each critical detail or step towards completing the task, with brief descriptions for each (no more than 20 words), \
                     and a score indicating the quality or efficiency of each approach, allowing the AI agent to choose the best path to follow without overthinking.\n\
-                    - The final prompt should be no more than 250 words.\n",
+                    - The final prompt should be no more than 250 words.\n\
+                    - The agent is less experienced and may require explicit guidance and brief step-by-step instructions to complete the task effectively.\n",
                 ReasoningLevel::None =>
                     "- The agent may not be very capable of its own planning and reasoning. \
                     Therefore the final prompt should be long and detailed, clearly explaining all aspects of the task and expected results/outcome, \
@@ -747,26 +788,40 @@ Reminder:
             formatter.with_section(TextSection::new(
                 None,
                 format!(
-"Please enhance the following prompt:
+"
+**Your Task**:
+
+Please enhance the following prompt:
 ```
 {}
 ```
 
-**What to Change/Enhance**:
-- Improve the prompt's wording and expand it with additional context and details if they are needed, using your best judgment, but keep it close to the spirit of the original prompt.
+**What to Change/Enhance/Clarify**:
+
+- Rewrite the prompt in well-worded ASD-STE100 and expand it with additional context and details if they are needed, using your best judgment, \
+but keep it close to the spirit of the original prompt.
 - Ensure that the agent understands the context and the requirements of the task.
 - Outline the steps needed to accomplish the task based on the capabilities of the AI agent: {}.
 {}\
-- The final prompt should be clear, concise, and easy to understand, covering all aspects of the original prompt.
 - Ensure that the final prompt is comprehensive and leaves no ambiguity for the AI agent.
-- The final product *must* be valid and of utmost quality, as well as polished-looking and visually appealing (if applicable), so express that in the final prompt.
-- Inform the agent that, once the task is completed, they should fix any mistakes, and then call `end_task` to inform the user.
+- The final product MUST be valid and of utmost quality, as well as polished-looking and visually appealing (if applicable), so express that in the final prompt.
+- Express that the agent MUST NOT directly read/write files outside of the environment, nor search/list external directories.
+- The agent may only access the internet in cases where it is required for the task, to download dependencies, or to acquire relevant information.
+- Also inform the agent that, once the task is completed, they should fix any mistakes, and then respond with a message containing ONLY a summary of the results.
 
-Understand that **a complex task with too many steps may confuse the AI agent**, as will too many words and directives.
-If the AI agent has to write a lot of text or code at one time, it may also become prone to making mistakes or overlooking important details.
+Be aware that the user wrote the above prompt, and they may make mistakes, may have misconceptions, or may not be aware of the complete picture, \
+so you may you use your best judgment to make corrections/clarifications.
+Understand that **a complex task with too many steps may confuse the AI agent**, as will too many words (both input and output) or directives.
+You should also clearly mark different sections of the prompt and emphasise important bits of information and keywords with formatting.
 
 **Agent Environment**:
+
 The agent will be working within an environment described as:
+```
+{}
+```
+
+The agent will have the following functions available to them to complete the task (these are the only way they can interact with the environment):
 ```
 {}
 ```
@@ -775,6 +830,7 @@ The agent will be working within an environment described as:
                     capabilities_list,
                     reasoning_level_instruction,
                     environment_prompt,
+                    function_jsons,
                 ),
             ))
             .into()
@@ -794,7 +850,7 @@ The agent will be working within an environment described as:
             0.5,
             false,
             prompt_enhancement_system,
-            move |formatter, inputs| prompt_enhancement_input(formatter, inputs, reasoning_level, &environment_prompt, &capabilities),
+            move |formatter, inputs| prompt_enhancement_input(formatter, inputs, reasoning_level, &environment_prompt, &capabilities, &function_jsons),
             prompt_enhancement_output,
             &[],
             Some(4096),

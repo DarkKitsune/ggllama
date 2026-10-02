@@ -9,7 +9,7 @@ use crate::{
     chat::{ChatMessage, ChatRole}, core::{ControlType, Core, ReasoningLevel}, util::JsonMap,
 };
 
-pub(crate) const BATCH_CAPACITY: usize = 2048;
+pub(crate) const BATCH_CAPACITY: usize = 8192;
 const CREATIVITY_NUDGE_DOWN_EVERY_N: usize = 25000; // Every N tokens, we nudge the creativity down towards 0.0 for stability over long contexts.
 /// Higher = creativity adapts downwards slower.
 const CREATIVITY_DOWN_DIVISOR: f32 = 8.0;
@@ -30,10 +30,9 @@ fn new_sampler_standard(model: &LlamaModel, creativity: f32, seed: u32, is_reaso
     };
 
     // Come up with sampler values based on the modified creativity
-    // These should be balanced so that an input creativity of 0.3333 with is_reasoning=true results in temperature being around 1.0
     let creativity = creativity.clamp(0.0, 1.0);
     let top_n_sigma = 0.4 + creativity;
-    let temperature = 0.3333 + creativity;
+    let temperature = 0.3 + creativity;
     //let repeat_penalty = 1.0 + creativity * 0.2;
 
     // Create sampler chain which only samples tokens that aren't very unlikely
@@ -50,7 +49,6 @@ fn new_sampler_standard(model: &LlamaModel, creativity: f32, seed: u32, is_reaso
         ));
     }
     samplers.push(LlamaSampler::top_n_sigma(top_n_sigma));
-    samplers.push(LlamaSampler::top_k(20));
     samplers.push(LlamaSampler::temp(temperature));
     samplers.push(LlamaSampler::dist(seed));
 
@@ -920,27 +918,11 @@ impl<'a> Inference<'a> {
         }
     }
 
-    /// Get the string representation of the end of message token(s).
-    /// This will return the string corresponding to the EOT token, EOS token, or the control type's turn ending, depending on which is available.
-    pub(crate) fn end_response_str(&self) -> String {
-        let eot_token = self.model().token_eot();
-
-        if eot_token.0 < 0 {
-            let eos_token = self.model().token_eos();
-
-            if eos_token.0 < 0 {
-                self.control_type.turn_ending().to_string()
-            } else {
-                self.model().token_to_str(eos_token, Special::Tokenize).unwrap()
-            }
-        } else {
-            self.model().token_to_str(eot_token, Special::Tokenize).unwrap()
-        }
-    }
-
     /// Terminate the current response message by pushing the EOT token into the context.
     pub(crate) fn end_response(&mut self) {
         let end_tokens = self.end_response_tokens();
         self.push_tokens(&end_tokens);
+        let end_str = self.model().tokens_to_str(&end_tokens, Special::Tokenize).unwrap();
+        print!("{}", end_str);
     }
 }
