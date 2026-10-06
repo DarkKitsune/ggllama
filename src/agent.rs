@@ -35,11 +35,11 @@ impl Capability {
 impl Display for Capability {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Capability::Python => write!(f, "working with Python code"),
-            Capability::Rust => write!(f, "working with Rust code"),
+            Capability::Python => write!(f, "writing Python code"),
+            Capability::Rust => write!(f, "writing Rust code"),
             Capability::FileWrite => write!(f, "modifying files"),
-            Capability::RunCommand => write!(f, "running system/shell commands"),
-            Capability::FileExecute => write!(f, "executing/building code files"),
+            Capability::RunCommand => write!(f, "running basic shell commands"),
+            Capability::FileExecute => write!(f, "compiling and executing code"),
             Capability::JavaScript => write!(f, "working with JavaScript code"),
             Capability::SpawnSubAgent(_) => write!(f, "spawning sub-agents with specific capabilities"),
             Capability::Other(s) => write!(f, "{}", s),

@@ -535,10 +535,11 @@ impl Core {
                 // Role section
                 .with_section(TextSection::new(
                     Some("Role".to_string()),
-                    "You are an intelligent AI agent that can perform tasks by calling functions in a virtual environment. \n\
+                    "You are an intelligent AI agent running on a host computer system that can perform tasks in a virtual environment by calling the relevant functions. \n\
                     You are very knowledgeable in many areas including science, technology, and the arts.\n\
-                    You are confident and precise, applying critical thinking, and making well-reasoned decisions.\n\
-                    You always verify your work and correct any mistakes promptly, ensuring the accuracy and reliability of your actions."
+                    You are confident and precise, applying critical thinking, and making well-reasoned decisions, while taking care not to waste too much time on the details. \
+                    You prefer to move quickly to a solution, and then fix and optimize it afterward, rather than spending time planning and thinking.\n\
+                    You always fix any critical mistakes promptly, and you like to go above and beyond where appropriate (while taking care not to overstep)."
                 ))
                 // Environment section
                 .with_section(TextSection::new(
@@ -564,8 +565,9 @@ impl Core {
                     You know your way around all aspects of software development from architecture, to bug fixing, to visual design.\n\
                     All code must be well-structured, **scalable** with comments marking where each section begins and ends, and describing when/how to edit them.\n\
                     Optimize your code for small size and clear readability, following best practices. Prefer short code over long code, without sacrificing function or clarity.\n\
-                    Correctness is paramount. **If you make mistakes, correct them promptly**.\n\
-                    Unless necessary, make only small, targeted edits to source code files, rather than large, sweeping changes or entire rewrites.",
+                    Prefer using the well-known dependencies and versions you are most familiar with, over learning new/updated APIs.\n\
+                    Prefer swift development from concept to prototype to final product, with comprehensive fixing and polishing as the final step, \
+                    rather than doing lots of planning and wasting time thinking.",
                 ));
             }
 
@@ -628,7 +630,6 @@ Reminder:
 - You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after.
 - If there is no function call available, or you get stuck, just respond without a tool call and explain why you could not continue.
 - Once you complete the task, you should respond with ONLY a summary of the actions taken and the results obtained, without including any tool calls.
-- Do not make any destructive function calls, without express permission first. Do NOT overwrite existing files unless necessary.
 </IMPORTANT>",
                         function_jsons
                     )
@@ -788,18 +789,17 @@ Reminder:
             formatter.with_section(TextSection::new(
                 None,
                 format!(
-"
-**Your Task**:
-
+"**Your Task**:
 Please enhance the following prompt:
 ```
 {}
 ```
 
-**What to Change/Enhance/Clarify**:
 
+**What to Change/Enhance/Clarify**:
 - Rewrite the prompt in well-worded ASD-STE100 and expand it with additional context and details if they are needed, using your best judgment, \
 but keep it close to the spirit of the original prompt.
+- Clearly mark different sections of the prompt and emphasise important bits of information and keywords with formatting.
 - Ensure that the agent understands the context and the requirements of the task.
 - Outline the steps needed to accomplish the task based on the capabilities of the AI agent: {}.
 {}\
@@ -809,23 +809,27 @@ but keep it close to the spirit of the original prompt.
 - The agent may only access the internet in cases where it is required for the task, to download dependencies, or to acquire relevant information.
 - Also inform the agent that, once the task is completed, they should fix any mistakes, and then respond with a message containing ONLY a summary of the results.
 
-Be aware that the user wrote the above prompt, and they may make mistakes, may have misconceptions, or may not be aware of the complete picture, \
+
+**Important** (do not mention any of the below to the agent in your prompt):
+- Be aware that the user wrote the above prompt, and they may make mistakes, may have misconceptions, or may not be aware of the complete picture, \
 so you may you use your best judgment to make corrections/clarifications.
-Understand that **a complex task with too many steps may confuse the AI agent**, as will too many words (both input and output) or directives.
-You should also clearly mark different sections of the prompt and emphasise important bits of information and keywords with formatting.
+- Even though the environment's host system is a full computer system, the agent does not have vision capabilities; \
+they may only interact with the environment through text means (calling functions and reading their results/outputs). \
+This means that the agent must ask the user to verify/review anything visual, create image assets, or to interact with any user interfaces. \
+Do NOT instruct the agent to perform these actions on their own.
+- Understand that **a complex task with too many steps may confuse the AI agent**, as will too many words (both input and output) or directives.
+
 
 **Agent Environment**:
-
 The agent will be working within an environment described as:
 ```
 {}
 ```
 
-The agent will have the following functions available to them to complete the task (these are the only way they can interact with the environment):
+The agent will have the following functions available to them to complete the task:
 ```
 {}
-```
-",
+```",
                     inputs["input"].as_str().expect("Expected 'input' to be a string"),
                     capabilities_list,
                     reasoning_level_instruction,

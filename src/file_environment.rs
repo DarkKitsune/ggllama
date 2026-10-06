@@ -4,6 +4,7 @@ use std::{
 };
 
 use anyhow::Result;
+use cmd_lib::{run_cmd, run_fun};
 
 use crate::{
     agent::{Capability, Environment, Function, FunctionParameter, ParameterType}, map, util::JsonMap,
@@ -27,6 +28,7 @@ pub struct DirectoryEnvironment {
     modified_files: Vec<PathBuf>,
     description: String,
     confirm_fn: Box<dyn FnMut(&str) -> bool>,
+    additional_functions: Vec<Function<Self>>,
 }
 
 impl DirectoryEnvironment {
@@ -39,6 +41,7 @@ impl DirectoryEnvironment {
             description: description.to_string(),
             modified_files: Vec::new(),
             confirm_fn: Box::new(confirm_fn),
+            additional_functions: Vec::new(),
         }
     }
 
@@ -104,6 +107,11 @@ impl DirectoryEnvironment {
     /// Gets all files and subdirectories in the given directory within the directory wrapped by this environment, recursively.
     pub fn get_all_files_and_directories(&self, relative_path: impl AsRef<Path>) -> Vec<PathBuf> {
         self.get_files(relative_path, true, true)
+    }
+
+    /// Adds an additional function to the environment.
+    pub fn add_function(&mut self, function: Function<Self>) {
+        self.additional_functions.push(function);
     }
 
     /// Reads the contents of a file in the directory wrapped by this environment.
@@ -361,56 +369,89 @@ impl DirectoryEnvironment {
     }
 
     /// Run arbitrary commands in the directory wrapped by this environment and return the output.
-    pub fn run_command(&mut self, command: &str, args: &[&str], current_dir: &str) -> Result<String> {
-        let output = std::process::Command::new(command)
-            .args(args)
-            .current_dir(&self.path.join(current_dir))
-            .output()
-            .map_err(|e| anyhow::anyhow!("Failed to execute `{}`: {}", command, e))?;
+    pub fn run_command(&mut self, command: &str, current_dir: &str) -> Result<String> {
+        // Remove any beginning and trailing slashes from the current directory path for consistency.
+        let current_dir = current_dir.trim_matches(&['/', '\\']);
 
-        // Exit early if the current directory does not exist within the environment.
-        let full_path = self.path.join(current_dir);
-        if !full_path.exists() {
+        // Join the paths and then get the absolute path
+        let full_path = self.path.join(&current_dir);
+        let full_path = absolute(&full_path)
+            .unwrap_or_else(|_| panic!("Failed to get absolute path: {}", full_path.display()));
+
+        // Ensure the full path is within the directory wrapped by this environment.
+        if !full_path.starts_with(&self.path) {
             return Err(anyhow::anyhow!(
-                "Attempted to run command in non-existent directory: {}",
+                "Attempted to read a file outside the directory: {}",
                 full_path.display()
             ));
         }
 
-        // Handle whether commands need confirmation, as well as special behavior for certain commands.
-        let needs_confirmation = match command {
-            "cd" => {
-                return Err(anyhow::anyhow!(
-                    "Changing directories with `cd` is not allowed as it is redundant; use the `current_dir` parameter instead."
-                ));
-            },
-            "cat" |
-            "echo" |
-            "grep" |
-            "ls" => false,
-            _ => true,
-        };
+        // Exit early if the current directory does not exist within the environment.
+        if !full_path.exists() {
+            return Err(anyhow::anyhow!(
+                "Attempted to run command in non-existent subdirectory: {}",
+                current_dir
+            ));
+        }
 
-        // Get user confirmation
-        let args_str = if args.is_empty() {
-            "".to_string()
-        } else {
-            format!(" {}", args.join(" "))
-        };
-        let confirmed = !needs_confirmation || (self.confirm_fn)(&format!("`{}{}` in `{}`", command, args_str, full_path.display()));
+        // Get user confirmation and exit with an error if the user does not confirm it
+        let confirmed = (self.confirm_fn)(&format!("`{}` in `{}`", command, full_path.display()));
         if !confirmed {
-            return Err(anyhow::anyhow!("Command execution cancelled by user."));
+            return Err(anyhow::anyhow!("Command `{}` is disallowed.", command));
         }
 
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).to_string())
-        } else {
-            Err(anyhow::anyhow!(
-                "Command `{}` failed.\n\nstderr:\n{}",
-                command,
-                String::from_utf8_lossy(&output.stderr)
-            ))
-        }
+        run_fun!(
+            cd $full_path;
+            cmd /c $command
+        ).map_err(|e| anyhow::anyhow!("Failed to run command `{}`: {}", command, e))
+    }
+    
+    /// Downloads the documentation for a Rust crate from docs.rs and converts it to markdown, using curl and pandoc.
+    pub fn get_docs_rs(crate_name: &str, version: &str, page: &str) -> Result<String> {
+        std::process::Command::new("curl")
+            .arg(&format!("https://docs.rs/{}/{}/{}.html", crate_name, version, page))
+            .output()
+            .map_err(|e| anyhow::anyhow!("Failed to execute `curl`: {}", e))
+            .and_then(|output| {
+                if output.status.success() {
+                    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+                } else {
+                    Err(anyhow::anyhow!(
+                        "Failed to download documentation for crate `{}` version `{}`.\n\nstderr:\n{}",
+                        crate_name,
+                        version,
+                        String::from_utf8_lossy(&output.stderr)
+                    ))
+                }
+            })
+            .and_then(|html| {
+                std::process::Command::new("pandoc")
+                    .arg("-f")
+                    .arg("html")
+                    .arg("-t")
+                    .arg("markdown")
+                    .arg("-o")
+                    .arg("-")
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .spawn()
+                    .map_err(|e| anyhow::anyhow!("Failed to execute `pandoc`: {}", e))
+                    .and_then(|mut child| {
+                        use std::io::Write;
+                        if let Some(stdin) = child.stdin.as_mut() {
+                            stdin.write_all(html.as_bytes()).unwrap();
+                        }
+                        let output = child.wait_with_output().unwrap();
+                        if output.status.success() {
+                            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+                        } else {
+                            Err(anyhow::anyhow!(
+                                "Failed to convert HTML to markdown.\n\nstderr:\n{}",
+                                String::from_utf8_lossy(&output.stderr)
+                            ))
+                        }
+                    })
+            })
     }
 }
 
@@ -437,7 +478,7 @@ impl Environment for DirectoryEnvironment {
     }
 
     fn available_functions(&self) -> Vec<Function<Self>> {
-        vec![/*
+        let mut functions = vec![/*
             // Function to get files in a given relative path within the environment directory.
             Function::new(
                 "list_files",
@@ -482,11 +523,11 @@ impl Environment for DirectoryEnvironment {
                         "matches" => env.grep(Path::new(file_path), pattern)?
                     })
                 },
-            ),*/
+            ),
             // Function to read the contents of a file in the environment directory.
             Function::new(
-                "read_file",
-                "Reads the entire contents of the file specified by `relative_path`, and returns it as a string. \
+                "open_file",
+                "Opens the file specified by `relative_path`, and returns the entire contents as a string. \
                 Use this function when you need to view the contents of files.",
                 vec![FunctionParameter::new(
                     "relative_path",
@@ -503,16 +544,16 @@ impl Environment for DirectoryEnvironment {
                         "contents" => env.read_file(file_path, false)?
                     })
                 },
-            ),
-            // Function to read just the lines between `start` and `end` from a file in the environment directory.
+            ),*/
+            // Function to read just the lines between `start_line` and `end_line` from a file in the environment directory.
             Function::new(
-                "read_lines",
-                "Reads the lines between `start` and `end` from the file specified by `relative_path`, and returns them as a string. \
+                "peek_file",
+                "Opens the file specified by `relative_path`, and returns the just the lines between `start_line` and `end_line` as a string. \
                 Use this function when you only need a specific portion of a file.",
                 vec![
                     FunctionParameter::new("relative_path", ParameterType::String),
-                    FunctionParameter::new("start", ParameterType::Number),
-                    FunctionParameter::new("end", ParameterType::Number),
+                    FunctionParameter::new("start_line", ParameterType::Number),
+                    FunctionParameter::new("end_line", ParameterType::Number),
                 ],
                 vec![],
                 |env: &mut DirectoryEnvironment, args: &JsonMap| {
@@ -522,15 +563,15 @@ impl Environment for DirectoryEnvironment {
                         .as_str()
                         .ok_or(anyhow::anyhow!("Argument 'relative_path' is not a string"))?;
                     let start = args
-                        .get("start")
-                        .ok_or(anyhow::anyhow!("Missing argument: start"))?
+                        .get("start_line")
+                        .ok_or(anyhow::anyhow!("Missing argument: start_line"))?
                         .as_u64()
-                        .ok_or(anyhow::anyhow!("Argument 'start' is not a number"))? as usize;
+                        .ok_or(anyhow::anyhow!("Argument 'start_line' is not a number"))? as usize;
                     let end = args
-                        .get("end")
-                        .ok_or(anyhow::anyhow!("Missing argument: end"))?
+                        .get("end_line")
+                        .ok_or(anyhow::anyhow!("Missing argument: end_line"))?
                         .as_u64()
-                        .ok_or(anyhow::anyhow!("Argument 'end' is not a number"))? as usize;
+                        .ok_or(anyhow::anyhow!("Argument 'end_line' is not a number"))? as usize;
                     let contents = env.read_file(file_path, false)?;
                     let lines: Vec<&str> = contents.lines().collect();
                     let selected_lines = lines.get(start.saturating_sub(1)..end.min(lines.len()))
@@ -572,15 +613,16 @@ impl Environment for DirectoryEnvironment {
                     })
                 },
             ),
-            // Function to replace everything between `start` and `end` lines in a file with a new substring.
+            // Function to replace everything between `start_line` and `end_line` lines in a file with a new substring.
             Function::new(
-                "replace_lines",
-                "Replaces the lines between `start` and `end` with `replacement` in the file specified by `relative_path`. \
-                Use this function when you need to make targeted edits to specific lines in a file.",
+                "edit_file",
+                "Replaces the lines between `start_line` and `end_line` with `replacement` in the file specified by `relative_path`. \
+                Use this function when you need to make targeted edits to specific lines in a file, rather than rewriting the entire file, \
+                as it is more efficient and preserves existing content.",
                 vec![
                     FunctionParameter::new("relative_path", ParameterType::String),
-                    FunctionParameter::new("start", ParameterType::Number),
-                    FunctionParameter::new("end", ParameterType::Number),
+                    FunctionParameter::new("start_line", ParameterType::Number),
+                    FunctionParameter::new("end_line", ParameterType::Number),
                     FunctionParameter::new("replacement", ParameterType::String),
                 ],
                 vec![
@@ -593,15 +635,15 @@ impl Environment for DirectoryEnvironment {
                         .as_str()
                         .ok_or(anyhow::anyhow!("Argument 'relative_path' is not a string"))?;
                     let start = args
-                        .get("start")
-                        .ok_or(anyhow::anyhow!("Missing argument: start"))?
+                        .get("start_line")
+                        .ok_or(anyhow::anyhow!("Missing argument: start_line"))?
                         .as_u64()
-                        .ok_or(anyhow::anyhow!("Argument 'start' is not a number"))? as usize;
+                        .ok_or(anyhow::anyhow!("Argument 'start_line' is not a number"))? as usize;
                     let end = args
-                        .get("end")
-                        .ok_or(anyhow::anyhow!("Missing argument: end"))?
+                        .get("end_line")
+                        .ok_or(anyhow::anyhow!("Missing argument: end_line"))?
                         .as_u64()
-                        .ok_or(anyhow::anyhow!("Argument 'end' is not a number"))? as usize;
+                        .ok_or(anyhow::anyhow!("Argument 'end_line' is not a number"))? as usize;
                     let replacement = args
                         .get("replacement")
                         .ok_or(anyhow::anyhow!("Missing argument: replacement"))?
@@ -624,7 +666,8 @@ impl Environment for DirectoryEnvironment {
             Function::new(
                 "replace_first",
                 "Replaces the first occurrence of `target` with `replacement` in the file specified by `relative_path`. \
-                Use this function when you need to make targeted edits to file contents, rather than rewriting the entire file, as it is more efficient and preserves existing content.",
+                Use this function when you need to make targeted edits to file contents, rather than rewriting the entire file, \
+                as it is more efficient and preserves existing content.",
                 vec![
                     FunctionParameter::new("relative_path", ParameterType::String),
                     FunctionParameter::new("target", ParameterType::String),
@@ -668,10 +711,10 @@ impl Environment for DirectoryEnvironment {
             // Function to run a shell command in the environment directory.
             Function::new(
                 "run_command",
-                "Runs one or more shell commands (e.g., `ls -la`) in the environment directory, using `working_directory` as the working directory. \
+                "Runs a shell command or multiple commands (after confirming with the user) and returns the raw output as a string. \
+                The commands will be run in `working_directory` relative to the environment directory (e.g., `.`). \
                 Use this function when you need to execute arbitrary shell commands within the environment. \
-                Separate multiple commands with semicolons. This is a very simple command parser which does NOT support `&&`, `|`, `>` or variables. \
-                Many commands will require confirmation from the user, so use this function with caution.",
+                If the user declines the confirmation, the command will not be executed.",
                 vec![
                     FunctionParameter::new("command", ParameterType::String),
                     FunctionParameter::new("working_directory", ParameterType::String),
@@ -685,12 +728,30 @@ impl Environment for DirectoryEnvironment {
                         .ok_or(anyhow::anyhow!("Missing argument: command"))?
                         .as_str()
                         .ok_or(anyhow::anyhow!("Argument 'command' is not a string"))?;
+                    
                     let working_directory = args
                         .get("working_directory")
                         .ok_or(anyhow::anyhow!("Missing argument: working_directory"))?
                         .as_str()
                         .ok_or(anyhow::anyhow!("Argument 'working_directory' is not a string"))?;
 
+                    let result = env.run_command(command, working_directory);
+
+                    Ok(match result {
+                        Ok(output) => {
+                            map! {
+                                "output" => output,
+                                "status" => "success"
+                            }
+                        },
+                        Err(e) => {
+                            map! {
+                                "error" => e.to_string(),
+                                "status" => "error"
+                            }
+                        },
+                    })
+                    /* 
                     // First split over all semicolons to handle multiple commands.
                     let commands: Vec<&str> = command.split(';').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
 
@@ -714,9 +775,11 @@ impl Environment for DirectoryEnvironment {
                     }
                     Ok(map! {
                         "results" => outputs
-                    })
+                    })*/
                 },
             ),
-        ]
+        ];
+        functions.extend(self.additional_functions.iter().cloned());
+        functions
     }
 }
