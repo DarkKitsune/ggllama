@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::Result;
-use cmd_lib::{run_cmd, run_fun};
+use cmd_lib::spawn_with_output;
 
 use crate::{
     agent::{Capability, Environment, Function, FunctionParameter, ParameterType}, map, util::JsonMap,
@@ -368,7 +368,7 @@ impl DirectoryEnvironment {
         }
     }
 
-    /// Run arbitrary commands in the directory wrapped by this environment and return the output.
+    /// Run arbitrary commands in the directory wrapped by this environment and return stdout and stderr together.
     pub fn run_command(&mut self, command: &str, current_dir: &str) -> Result<String> {
         // Remove any beginning and trailing slashes from the current directory path for consistency.
         let current_dir = current_dir.trim_matches(&['/', '\\']);
@@ -397,19 +397,31 @@ impl DirectoryEnvironment {
         // Get user confirmation and exit with an error if the user does not confirm it
         let confirmed = (self.confirm_fn)(&format!("`{}` in `{}`", command, full_path.display()));
         if !confirmed {
-            return Err(anyhow::anyhow!("Command `{}` is disallowed.", command));
+            return Err(anyhow::anyhow!("User denied the command."));
         }
 
-        run_fun!(
-            cd $full_path;
-            cmd /c $command
-        ).map_err(|e| anyhow::anyhow!("Failed to run command `{}`: {}", command, e))
+        // Run the command in the specified directory and capture the output.
+        // TODO: Make this support other shells and platforms, not just Windows cmd.
+        let full_path_str = full_path.display().to_string();
+        let (result, stdout, stderr) = spawn_with_output!(
+            cmd /c "cd $full_path_str && $command"
+        )
+            .unwrap()
+            .wait_with_all();
+        
+        // Check if the command was successful
+        match result {
+            Ok(()) => {
+                Ok(format!("{}", stdout))
+            }
+            Err(_) => Err(anyhow::anyhow!("Command `{}` exited with error.\nstdout:\n{}\nstderr:\n{}", command, stdout, stderr)),
+        }
     }
     
     /// Downloads the documentation for a Rust crate from docs.rs and converts it to markdown, using curl and pandoc.
     pub fn get_docs_rs(crate_name: &str, version: &str, page: &str) -> Result<String> {
         std::process::Command::new("curl")
-            .arg(&format!("https://docs.rs/{}/{}/{}.html", crate_name, version, page))
+            .arg(&format!("https://docs.rs/{crate_name}/{version}/{crate_name}/{page}.html"))
             .output()
             .map_err(|e| anyhow::anyhow!("Failed to execute `curl`: {}", e))
             .and_then(|output| {
@@ -470,8 +482,9 @@ impl Environment for DirectoryEnvironment {
 
         format!(
             "The environment is a directory in a file system.\n\
-            You may read or write files within the environment directory, \
-            but you may not do anything with files outside of the directory in any way.\n\n\
+            You may read files (using the `cat` command) or write files (using the provided functions) within the environment directory, \
+            but you may not do anything with files outside of the directory in any way.\n\
+            \n\
             {}",
             self.description,
         )
@@ -524,27 +537,6 @@ impl Environment for DirectoryEnvironment {
                     })
                 },
             ),
-            // Function to read the contents of a file in the environment directory.
-            Function::new(
-                "open_file",
-                "Opens the file specified by `relative_path`, and returns the entire contents as a string. \
-                Use this function when you need to view the contents of files.",
-                vec![FunctionParameter::new(
-                    "relative_path",
-                    ParameterType::String,
-                )],
-                vec![],
-                |env: &mut DirectoryEnvironment, args: &JsonMap| {
-                    let file_path = args
-                        .get("relative_path")
-                        .ok_or(anyhow::anyhow!("Missing argument: relative_path"))?
-                        .as_str()
-                        .ok_or(anyhow::anyhow!("Argument 'relative_path' is not a string"))?;
-                    Ok(map! {
-                        "contents" => env.read_file(file_path, false)?
-                    })
-                },
-            ),*/
             // Function to read just the lines between `start_line` and `end_line` from a file in the environment directory.
             Function::new(
                 "peek_file",
@@ -578,6 +570,28 @@ impl Environment for DirectoryEnvironment {
                         .ok_or(anyhow::anyhow!("Invalid line range for file \"{}\"", file_path))?;
                     Ok(map! {
                         "lines" => selected_lines.join("\n")
+                    })
+                },
+            ),
+            */
+            // Function to read the contents of a file in the environment directory.
+            Function::new(
+                "read_file",
+                "Reads the file specified by `relative_path`, and returns the entire contents as a string. \
+                Use this function when you need to view the contents of a text file.",
+                vec![FunctionParameter::new(
+                    "relative_path",
+                    ParameterType::String,
+                )],
+                vec![],
+                |env: &mut DirectoryEnvironment, args: &JsonMap| {
+                    let file_path = args
+                        .get("relative_path")
+                        .ok_or(anyhow::anyhow!("Missing argument: relative_path"))?
+                        .as_str()
+                        .ok_or(anyhow::anyhow!("Argument 'relative_path' is not a string"))?;
+                    Ok(map! {
+                        "contents" => env.read_file(file_path, false)?
                     })
                 },
             ),
@@ -711,7 +725,7 @@ impl Environment for DirectoryEnvironment {
             // Function to run a shell command in the environment directory.
             Function::new(
                 "run_command",
-                "Runs a shell command or multiple commands (after confirming with the user) and returns the raw output as a string. \
+                "Runs a shell command (after confirming with the user) and returns the raw output as a string. \
                 The commands will be run in `working_directory` relative to the environment directory (e.g., `.`). \
                 Use this function when you need to execute arbitrary shell commands within the environment. \
                 If the user declines the confirmation, the command will not be executed.",
@@ -751,31 +765,58 @@ impl Environment for DirectoryEnvironment {
                             }
                         },
                     })
-                    /* 
-                    // First split over all semicolons to handle multiple commands.
-                    let commands: Vec<&str> = command.split(';').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+                },
+            ),
+            // Function to retrieve documentation for a specific crate, version, and item from docs.rs.
+            Function::new(
+                "docs_rs",
+                "Retrieves documentation for a specific crate, version, and item from docs.rs. The documentation will be converted to markdown automatically. \
+                The `version` parameter specifies which version of the crate to retrieve documentation for, or \"latest\" to get the most recent version. \
+                The `item` parameter specifies which item within the crate's documentation to retrieve (e.g., \"macro.Token\", \"struct.Foo\", \"fn.bar\"); \
+                alternatively, you can pass \"index\" as the item to get the index page of the crate's documentation.",
+                vec![
+                    FunctionParameter::new("crate", ParameterType::String),
+                    FunctionParameter::new("version", ParameterType::String),
+                    FunctionParameter::new("item", ParameterType::String),
+                ],
+                vec![
+                    Capability::Rust,
+                ],
+                |_env: &mut DirectoryEnvironment, args: &JsonMap| {
+                    let krate = args
+                        .get("crate")
+                        .ok_or(anyhow::anyhow!("Missing argument: crate"))?
+                        .as_str()
+                        .ok_or(anyhow::anyhow!("Argument 'crate' is not a string"))?;
 
-                    let mut outputs = Vec::new();
-                    for cmd in commands {
-                        let command_parts: Vec<&str> = cmd.split_whitespace().collect();
-                        let command_name = command_parts[0];
-                        let command_args = &command_parts[1..];
-                        let result = env.run_command(command_name, command_args, working_directory);
+                    let version = args
+                        .get("version")
+                        .ok_or(anyhow::anyhow!("Missing argument: version"))?
+                        .as_str()
+                        .ok_or(anyhow::anyhow!("Argument 'version' is not a string"))?;
 
-                        match result {
-                            Ok(output) => outputs.push(map! {
-                                "output" => output,
+                    let item = args
+                        .get("item")
+                        .ok_or(anyhow::anyhow!("Missing argument: item"))?
+                        .as_str()
+                        .ok_or(anyhow::anyhow!("Argument 'item' is not a string"))?;
+
+                    let result = DirectoryEnvironment::get_docs_rs(krate, version, item);
+
+                    Ok(match result {
+                        Ok(doc) => {
+                            map! {
+                                "documentation" => doc,
                                 "status" => "success"
-                            }),
-                            Err(e) => outputs.push(map! {
+                            }
+                        },
+                        Err(e) => {
+                            map! {
                                 "error" => e.to_string(),
                                 "status" => "error"
-                            }),
-                        }
-                    }
-                    Ok(map! {
-                        "results" => outputs
-                    })*/
+                            }
+                        },
+                    })
                 },
             ),
         ];

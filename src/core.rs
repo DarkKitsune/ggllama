@@ -557,18 +557,26 @@ impl Core {
                     )
                 ));
 
-            // Coding section if the agent can write code
+            // Coding section if the agent can write any code
             if language_capabilities.iter().any(|capability| capability.can_code()) {
                 prompt = prompt.with_section(TextSection::new(
                     Some("Coding".to_string()),
-                    "You are a confident, expert full-stack programmer.\n\
-                    You know your way around all aspects of software development from architecture, to bug fixing, to visual design.\n\
-                    All code must be well-structured, **scalable** with comments marking where each section begins and ends, and describing when/how to edit them.\n\
+                    "You know your way around all aspects of software development, from writing idiomatic code to managing dependencies and optimizing performance.\n\
+                    All code must be well-structured, **scalable** with comments clearly marking where each section begins and ends, and describing when/how to edit them.\n\
                     Optimize your code for small size and clear readability, following best practices. Prefer short code over long code, without sacrificing function or clarity.\n\
-                    Prefer using the well-known dependencies and versions you are most familiar with, over learning new/updated APIs.\n\
                     Prefer swift development from concept to prototype to final product, with comprehensive fixing and polishing as the final step, \
                     rather than doing lots of planning and wasting time thinking.",
                 ));
+            }
+
+            // Sections for each capability
+            for capability in language_capabilities {
+                if let Some((label, content)) = capability.system_prompt_section() {
+                    prompt = prompt.with_section(TextSection::new(
+                        Some(label.to_string()),
+                        content,
+                    ));
+                }
             }
 
             // Function calls section
@@ -806,7 +814,6 @@ but keep it close to the spirit of the original prompt.
 - Ensure that the final prompt is comprehensive and leaves no ambiguity for the AI agent.
 - The final product MUST be valid and of utmost quality, as well as polished-looking and visually appealing (if applicable), so express that in the final prompt.
 - Express that the agent MUST NOT directly read/write files outside of the environment, nor search/list external directories.
-- The agent may only access the internet in cases where it is required for the task, to download dependencies, or to acquire relevant information.
 - Also inform the agent that, once the task is completed, they should fix any mistakes, and then respond with a message containing ONLY a summary of the results.
 
 

@@ -225,7 +225,7 @@ impl<'a> Chat<'a> {
     /// Compacts the chat context if it exceeds two-thirds of the context size limit.
     /// This works by taking the first half of the chat's messages, summarizing them, then inserting the summary back into the context.
     pub(crate) fn compact_context(&mut self) {
-        if self.inference.context_len() > (self.context_size_limit as f32 * (2.0 / 3.0)) as usize {
+        if self.inference.context_len() > (self.context_size_limit as f32 * (4.0 / 5.0)) as usize {
             // Get the first half of the chat's messages to summarize
             let half = self.all_messages.len() / 2;
 

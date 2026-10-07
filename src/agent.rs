@@ -30,6 +30,19 @@ impl Capability {
             _ => false,
         }
     }
+
+    /// Returns the label for this capability's system prompt section, as well as the content itself.
+    pub fn system_prompt_section(&self) -> Option<(&str, &str)> {
+        match self {
+            Capability::Rust => Some((
+                "Rust",
+                "You are a confident, expert Rust programmer, well-versed in idiomatic Rust practices and up to date with the latest developments in the Rust ecosystem.\n\
+                Prefer using the well-known dependencies and versions you are most familiar with, over learning new/updated APIs.\n\
+                Avoid doing broad searches of the Cargo registry as it may contain a very large number of files."
+            )),
+            _ => None,
+        }
+    }
 }
 
 impl Display for Capability {
